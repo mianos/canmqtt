@@ -1,0 +1,47 @@
+# Target + flash — Waveshare ESP32-S3-RS485-CAN (ESP32-S3R8 module).
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+
+# 8MB PSRAM. The "R8" in ESP32-S3R8 is the OCTAL 8MB variant, so SPIRAM_MODE_OCT.
+# NOTE: PSRAM is a convenience here, not a requirement — nothing on the CAN hot
+# path uses it (the RX ring is deliberately internal DRAM, see CanBus.h). If a
+# given board turns out to be quad, boot fails to map SPIRAM: swap in
+# CONFIG_SPIRAM_MODE_QUAD, or drop CONFIG_SPIRAM entirely and the firmware still
+# runs. Confirm from the module marking or `esptool flash_id`.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Custom dual-OTA partition table (see partitions.csv).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+# A 500kbit/s bus can deliver ~4000 frames/s; keep both cores at full clock so
+# the RX ISR never becomes the bottleneck.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# Put the TWAI ISR in IRAM. This is not cosmetic on a busy bus: whenever the
+# flash cache is disabled for a write (an NVS settings save, or a POST /firmware
+# OTA), an ISR living in flash is starved and frames are silently dropped.
+# Full TWAI_ISR_CACHE_SAFE additionally demands the callbacks AND user_ctx be in
+# IRAM, which would constrain CanBus's structure — only escalate to it if the
+# ring's drop counter (tele/<name>/stats "drops") shows losses during an OTA.
+CONFIG_TWAI_ISR_IN_IRAM=y
+
+# The legacy driver/twai.h shim is unused (we build against the node-based
+# esp_twai.h); silence its deprecation #warning in case a transitive include
+# ever drags it in.
+CONFIG_TWAI_SUPPRESS_DEPRECATE_WARN=y
+
+# OTA rollback: a freshly-OTA'd image boots PENDING_VERIFY; app_main marks it
+# valid once Wi-Fi is back (see otaVerifyTask). Any failure rolls back.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# app_main only wires things up and spawns tasks.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# C++: mianesp components use std::function / std::regex.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_RTTI=y

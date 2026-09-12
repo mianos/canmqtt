@@ -1,0 +1,17 @@
+# ESP-IDF Partition Table — 16MB flash, dual-OTA layout.
+#
+# nvs keeps its standard offset so Wi-Fi creds / hostname / settings survive OTA
+# partition swaps. otadata replaces the old phy_init slot at 0xf000; phy_init
+# shifts to 0x11000. Two 3MB app slots leave plenty of headroom over the binary;
+# the first OTA after a wired single-app flash lands in ota_0 via
+# esp_ota_get_next_update_partition().
+#
+# The remaining ~10MB of the 16MB part is deliberately left unallocated — a
+# future frame-log partition (SPIFFS/FAT, for on-device capture to survive a
+# power cycle) can be added without moving nvs or the app slots.
+# Name,     Type, SubType, Offset,    Size,     Flags
+nvs,        data, nvs,     0x9000,    0x6000,
+otadata,    data, ota,     0xf000,    0x2000,
+phy_init,   data, phy,     0x11000,   0x1000,
+ota_0,      app,  ota_0,   0x20000,   0x300000,
+ota_1,      app,  ota_1,   0x320000,  0x300000,

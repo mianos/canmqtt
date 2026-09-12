@@ -1,0 +1,32 @@
+dependencies:
+  # Shared infrastructure — mianesp repo, main branch (same pattern as
+  # mqttradar / ws-voice / doorbell3). Settings stays app-local (main/Settings.h).
+  jsonwrapper:
+    git: git@github.com:mianos/mianesp.git
+    path: components/jsonwrapper
+    version: main
+  nvsstoragemanager:
+    git: git@github.com:mianos/mianesp.git
+    path: components/nvsstoragemanager
+    version: main
+  wifimanager:
+    git: git@github.com:mianos/mianesp.git
+    path: components/wifimanager
+    version: main
+  webserver:
+    git: git@github.com:mianos/mianesp.git
+    path: components/webserver
+    version: main
+  mqttwrapper:
+    git: git@github.com:mianos/mianesp.git
+    path: components/mqttwrapper
+    version: main
+  settingsbase:
+    git: git@github.com:mianos/mianesp.git
+    path: components/settingsbase
+    version: main
+
+  # cJSON is no longer bundled in IDF v6; mqtt is a managed component.
+  # main.cpp builds the esp_mqtt_client config directly.
+  espressif/cjson: "*"
+  espressif/mqtt: "*"

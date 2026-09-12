@@ -1,0 +1,81 @@
+#pragma once
+
+#include "SettingsBase.h"
+
+// mqttcan settings schema — persistence/reset/log machinery lives in mianesp's
+// settingsbase. Member initialisers are the compiled-in defaults; missing or
+// unparseable NVS config falls back to them (logged).
+//
+// SettingsBase only stores std::string and int fields, so booleans are modelled
+// as 0/1 ints.
+struct Settings : SettingsBase {
+    std::string mqttServer = "mqtt2.mianos.com";
+    int         mqttPort   = 1883;
+    std::string sensorName = "mqttcan";
+    std::string tz         = "AEST-10AEDT,M10.1.0,M4.1.0/3";
+
+    // --- CAN bus ---
+    // 500000 is a well-corroborated first guess for the R1200GS, but NOT a
+    // confirmed BMW spec for the K25: a 2008 R1200GS Adventure got error-free
+    // frames at 500k with an MCP2515 and failed at 125k/250k/1M, and an R1200R
+    // tapped at the OBD connector worked with SocketCAN at 500000. No source
+    // states the rate authoritatively. It is therefore settable at runtime and
+    // applies live (see the can_bitrate onChange hook in main.cpp) — if the bus
+    // shows zero frames and a climbing error count, try 125000 next.
+    int canBitrate = 500000;
+
+    // 1 ⇒ the TWAI controller is put in hardware listen-only mode: it never
+    // transmits and never acknowledges, so it cannot perturb the vehicle bus.
+    // Prior art matters here — someone's nominally "listen-only" sniffer
+    // intermittently transmitted and toggled their bike's rear brake light.
+    // Deliberately NOT live-applied: a change is persisted but only takes
+    // effect on the next boot, and coming up non-passive is logged at WARN.
+    int canListenOnly = 1;
+
+    // --- Publish policy ---
+    // A 500kbit/s bus can carry thousands of frames/sec, so publishing every
+    // frame would flatten the broker. Instead a frame is published only when
+    // its payload *changes*, floored at publishMinMs per ID, with an optional
+    // slow heartbeat so a static ID still reports in. Same decimation idea as
+    // mqttradar's presencePeriodSec, applied per CAN ID.
+    int publishMinMs       = 200;    // per-ID floor between change publishes
+    int publishHeartbeatMs = 60000;  // republish an unchanged ID this often (0 = never)
+    int publishEnable      = 1;      // 0 ⇒ observe only; /can/ids still fills in
+
+    // 1 ⇒ also ESP_LOGI each published frame to the console. Mirrors
+    // mqttradar's PrintEP sitting alongside its MQTT publisher: invaluable on
+    // the bench (and on the bike over USB serial) where there is no broker to
+    // watch. Costs a line of UART per published frame, so leave it off in
+    // normal operation.
+    int logFrames = 0;
+
+    // --- Capacity ---
+    // Both are read once at startup (the tables are allocated from them), so a
+    // change needs a reboot.
+    int maxTrackedIds  = 256;   // distinct CAN IDs in the frame table
+    int dumpRingFrames = 2048;  // raw frames retained for GET /can/dump
+
+    // --- Bench self-test ---
+    // 1 ⇒ transmit synthetic frames to ourselves to exercise the whole
+    // ISR→ring→table→MQTT path with no bus attached. Requires canListenOnly=0
+    // (a listen-only node physically cannot transmit) and is refused otherwise.
+    // Never enable this on the vehicle.
+    int selfTest = 0;
+
+    explicit Settings(NvsStorageManager& nvs) : SettingsBase(nvs) {
+        field("mqtt_server", mqttServer);
+        field("mqtt_port",   mqttPort);
+        field("sensor_name", sensorName);
+        field("tz",          tz);
+        field("can_bitrate",     canBitrate);
+        field("can_listen_only", canListenOnly);
+        field("publish_min_ms",       publishMinMs);
+        field("publish_heartbeat_ms", publishHeartbeatMs);
+        field("publish_enable",       publishEnable);
+        field("log_frames",           logFrames);
+        field("max_tracked_ids",  maxTrackedIds);
+        field("dump_ring_frames", dumpRingFrames);
+        field("self_test",        selfTest);
+        load();
+    }
+};
