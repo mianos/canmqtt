@@ -3,12 +3,20 @@
 #include <cinttypes>
 #include <cstring>
 
+#include "esp_heap_caps.h"
+#include "esp_memory_utils.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 
 namespace {
 constexpr const char* TAG = "canbus";
+
+// Every frame is memcpy'd through the queue from ISR context, so the size is
+// part of the design rather than an accident — 256 frames is 8KB of internal
+// DRAM. Fails the build if a field is added carelessly.
+static_assert(sizeof(CanFrame) == 32, "CanFrame grew; re-check RX queue sizing");
 
 // Worker task: priority above the telemetry/web tasks (they're 4-5) so a burst
 // of frames drains promptly, but below the TWAI ISR itself.
@@ -36,7 +44,7 @@ CanBus::~CanBus() {
         twai_node_delete(node_);
     }
     if (task_)   vTaskDelete(task_);
-    if (queue_)  vQueueDelete(queue_);
+    if (queue_)  vQueueDeleteWithCaps(queue_);
     if (txLock_) vSemaphoreDelete(txLock_);
 }
 
@@ -176,17 +184,30 @@ esp_err_t CanBus::start(uint32_t bitrate, bool listenOnly, size_t queueDepth,
 
     handler_ = std::move(handler);
 
-    queue_ = xQueueCreate(queueDepth, sizeof(CanFrame));
+    // Pinned to internal DRAM, not left to the general heap. With
+    // CONFIG_SPIRAM_USE_MALLOC a plain xQueueCreate() only lands internal while
+    // the allocation stays under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL (16KB by
+    // default) — so at today's 256 frames it happens to, and at 512+ it would
+    // silently move to PSRAM. That matters twice: PSRAM is slow to touch from
+    // an ISR running at several thousand frames a second, and it is outright
+    // illegal if TWAI_ISR_CACHE_SAFE is ever enabled (cache off during the
+    // ISR). Same call the TWAI driver uses for its own queues.
+    queue_ = xQueueCreateWithCaps(queueDepth, sizeof(CanFrame),
+                                  MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (queue_ == nullptr) {
-        ESP_LOGE(TAG, "failed to allocate a %u-frame RX queue", (unsigned)queueDepth);
+        ESP_LOGE(TAG, "failed to allocate a %u-frame internal-DRAM RX queue",
+                 (unsigned)queueDepth);
         return ESP_ERR_NO_MEM;
     }
+    ESP_LOGI(TAG, "RX queue: %u frames x %u B at %p (%s)", (unsigned)queueDepth,
+             (unsigned)sizeof(CanFrame), (void*)queue_,
+             esp_ptr_internal(queue_) ? "internal DRAM" : "PSRAM - UNEXPECTED");
 
     // The worker task must exist before the node is enabled, or the first
     // frames arrive with nothing draining the queue.
     if (xTaskCreate(workerTask, "can_rx", kWorkerStack, this, kWorkerPriority, &task_) != pdPASS) {
         ESP_LOGE(TAG, "failed to create worker task");
-        vQueueDelete(queue_);
+        vQueueDeleteWithCaps(queue_);
         queue_ = nullptr;
         return ESP_ERR_NO_MEM;
     }
@@ -195,7 +216,7 @@ esp_err_t CanBus::start(uint32_t bitrate, bool listenOnly, size_t queueDepth,
     if (err != ESP_OK) {
         vTaskDelete(task_);
         task_ = nullptr;
-        vQueueDelete(queue_);
+        vQueueDeleteWithCaps(queue_);
         queue_ = nullptr;
         return err;
     }

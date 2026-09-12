@@ -228,7 +228,18 @@ in flash is starved whenever the cache is disabled for a flash write (an NVS
 settings save, or a `POST /firmware` OTA) and frames are silently dropped. If
 `stats.drops` ever shows losses during an OTA, the escalation is
 `TWAI_ISR_CACHE_SAFE`, which additionally requires the callbacks *and* `user_ctx`
-in IRAM — which is also why the RX queue stays in internal DRAM rather than PSRAM.
+in IRAM.
+
+**The RX queue is pinned to internal DRAM**, via
+`xQueueCreateWithCaps(..., MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)` rather than a
+plain `xQueueCreate()`. This is enforced rather than incidental: with
+`CONFIG_SPIRAM_USE_MALLOC=y` the general heap only keeps an allocation internal
+while it stays under `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL` (16KB default), so at
+the current 256 frames × 32 B = 8KB it would land internal by luck, and a larger
+queue depth would silently migrate to PSRAM. PSRAM is slow to touch from an ISR
+running at thousands of frames a second, and illegal outright under
+`TWAI_ISR_CACHE_SAFE`. A `static_assert` pins `sizeof(CanFrame)` at 32 bytes so
+the sizing above stays honest, and the queue's placement is logged at startup.
 
 ## Layout
 
