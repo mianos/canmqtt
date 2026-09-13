@@ -14,6 +14,13 @@ struct Settings : SettingsBase {
     std::string sensorName = "mqttcan";
     std::string tz         = "AEST-10AEDT,M10.1.0,M4.1.0/3";
 
+    // Wi-Fi regulatory domain. ESP-IDF defaults to "01" (worldwide), which
+    // allows only channels 1-11 — so an AP on channel 12 or 13 is invisible and
+    // association fails with reason 201 NO_AP_FOUND even though the SSID and
+    // password are correct. AU (like most of the world outside North America)
+    // permits 1-13, so default to that and keep it settable.
+    std::string wifiCountry = "AU";
+
     // --- CAN bus ---
     // 500000 is a well-corroborated first guess for the R1200GS, but NOT a
     // confirmed BMW spec for the K25: a 2008 R1200GS Adventure got error-free
@@ -67,6 +74,7 @@ struct Settings : SettingsBase {
         field("mqtt_port",   mqttPort);
         field("sensor_name", sensorName);
         field("tz",          tz);
+        field("wifi_country", wifiCountry);
         field("can_bitrate",     canBitrate);
         field("can_listen_only", canListenOnly);
         field("publish_min_ms",       publishMinMs);

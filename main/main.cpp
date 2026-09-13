@@ -328,6 +328,15 @@ extern "C" void app_main(void) {
     std::string host = settings.sensorName;
     wifi.configSetHostName(host);
 
+    // Regulatory domain. The IDF default "01" caps scanning at channel 11, so an
+    // AP on ch12/13 is simply never found (reason 201) however correct the
+    // credentials are. Must be set after the Wi-Fi stack is up.
+    {
+        esp_err_t cr = esp_wifi_set_country_code(settings.wifiCountry.c_str(), true);
+        ESP_LOGI(TAG, "wifi country '%s': %s", settings.wifiCountry.c_str(),
+                 esp_err_to_name(cr));
+    }
+
     // Association diagnostics (see onWifiEvent). Registered after WiFiManager
     // has initialised the Wi-Fi stack and event loop.
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, nullptr);
