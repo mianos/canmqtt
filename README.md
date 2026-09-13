@@ -131,7 +131,7 @@ Publishes — `tele/mqttcan/…`:
 | `POST /can/reset` | clear table + ring |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
 | `GET`/`POST /firmware` | OTA (raw `.bin` body) |
-| `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base |
+| `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base. **`/reset` wipes the Wi-Fi credentials** and reboots into provisioning; it is not a restart. To reboot after a setting that needs one, use `cmnd/<name>/restart` over MQTT or power-cycle |
 
 ## Decoding: named signals
 
@@ -169,34 +169,53 @@ unknown code is exactly the kind of gap this project exists to close.
 
 | key | meaning |
 |---|---|
-| `byte_base` | which `data[]` index `D1` means; `1` ⇒ `D1` is `data[0]` |
+| `version` | integer; a reflash replaces a stored table whose version is lower than the build's, so bump it on a table you upload and want to keep |
+| `byte_base` | which `data[]` index `D1` means; `0` ⇒ `Dn` is `data[n]` (the community sheet's convention, and the default) |
 | `bytes[]` | little-endian byte list, least-significant first: `(D3*256+D2)` is `[2,3]` |
 | `nibble` | `"high"` / `"low"` / absent |
 | `parts[]` | `{byte, nibble}` list, for keys built from several nibbles (ESA damping); joined with `,` |
 | `scale`, `offset` | `value = raw * scale + offset` |
 | `map{}` | uppercase-hex key → label; its presence makes the signal an enum |
+| `default` | label for a code missing from `map`; without it the code reports as `unmapped_0xNN` |
 | `deadband`, `min_ms` | suppress chatter on analog signals |
 
-### Caveats in the source table
+### Provenance, and what is still unverified
 
-The table was transcribed from community reverse-engineering, and three entries
-are self-contradictory. Each is encoded as described and flagged with a `_note`
-in the JSON:
+The table is the K25 subset of the community
+[BMW Motorrad CAN sheet](https://docs.google.com/spreadsheets/d/1tUrOES5fQZa92Robr6uP8v2dzQDq9ohHjUiTU3isqdc)
+(Keith Conger et al.). Its Key tab defines the payload as `D0`–`D7`, so
+`D1` is `data[1]`; the 2013 ancestor of the sheet numbered the same fields
+`byte1`–`byte8`, and the
+[Arduino sniffer](https://github.com/4G-Gregg/BMW-GS-CAN-Sniffer) written
+against a 2010 K25 from that ancestor reads heated grips from `data[7]` and
+throttle from `data[1]`, which settles the indexing. That sniffer's source is
+the only evidence here of code that actually ran on a K25, and it agrees with
+the sheet on high beam, turn signals, info button, heated grips, ABS button and
+brake levers.
 
-- **Byte indexing is ambiguous.** The source uses `D1`–`D7` and never `D0` or
-  `D8`, so `D1` is either `data[0]` or `data[1]`. Default is `byte_base: 1`
-  (`D1` = `data[0]`). **Verify this first** — idle RPM on `10C` should read
-  ~1000–1100. If everything is nonsense, set `byte_base: 0` and re-upload.
-- **`2D0` D7 is claimed twice**: heated grips (high nibble `C`/`D`/`E`) *and*
-  ignition (`FF`/`DF`, which are whole bytes, and `DF`'s high nibble collides
-  with grips-low). Ignition is encoded as the whole byte.
-- **`10C` throttle position** says `D6(High Nibble)` but gives
-  `DEC(D6)/255*100`; `/255` implies 8 bits, so the whole byte is used. Compare
-  against `throttle_valve_pct`, which should track it.
+It disagrees on three nibbles, and the sheet has two internal slips. Each is
+flagged with a `_note` in the JSON and encoded as follows:
 
-Front wheel speed on `294` is given with an approximate scale (`~0.06`) where
-the rear on `2A8` is exact — calibrate against GPS. Treat every mapping as a
-hypothesis until you have confirmed it on your own bike.
+- **`10C` clutch**: sheet says high nibble of `D4`, sniffer reads the low
+  nibble, same `6`/`A` values. Sheet kept. Pull the clutch and see which
+  nibble moves.
+- **`294` ABS state**: sheet says low nibble of `D1`, sniffer reads the high
+  nibble, same `5`/`B` values. Sheet kept.
+- **`3FF` ambient light**: sheet `B` dark / `7` light, sniffer `7` dark /
+  `3` light. Sheet kept; anything else surfaces as `unmapped_0xN`.
+- **`2D0` D7** carries heated grips in the high nibble (`C`/`D`/`E`, sniffer
+  confirmed) and the sheet's separate ignition row (`FF` off / `DF` on) is the
+  same byte seen with the grips on low. Ignition is therefore `FF` ⇒ off,
+  anything else ⇒ on, via `default`; grips report `unavailable` on `F`.
+- **`10C` throttle position** says `D6(High Nibble)` with a `/255` formula; the
+  2013 sheet had it as a whole byte and so does the K50 row. Whole byte used.
+- **`2BC` gear** moved from the low nibble (2013) to the high nibble (current,
+  eight models). High nibble used.
+
+Front wheel speed on `294` has carried `~0.06` since 2013 while the rear on
+`2A8` is exact. No GPS is needed to fix it: at steady speed in a straight line
+the two wheels must agree, so `scale = 0.06 × rear_raw / front_raw`. Treat every
+mapping as a hypothesis until you have confirmed it on your own bike.
 
 ## Decoding workflow
 

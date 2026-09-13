@@ -298,6 +298,13 @@ void selfTestTask(void* arg) {
         uint8_t b[8] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00};
         app->bus->transmit(0x2BC, false, b, sizeof(b));
 
+        // 0x2D0: exercises the enum paths -- nibble maps, the composite ESA
+        // key (D4 low + D7 low) and the ignition "default" label (D7 != FF).
+        // Expected: ambient 24C, fuel 25.1%, preload norm_1helm, damping
+        // soft_smooth, info off, grips off, ignition on.
+        uint8_t d[8] = {0x00, 0x80, 0x00, 0x40, 0x2B, 0x04, 0x00, 0xC1};
+        app->bus->transmit(0x2D0, false, d, sizeof(d));
+
         // An extended-ID frame: the K25 prior art suggests 29-bit IDs, so make
         // sure that path is exercised too.
         uint8_t c[4] = {counter, 0x00, 0x5A, 0xA5};

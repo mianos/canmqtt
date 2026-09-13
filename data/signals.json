@@ -1,9 +1,13 @@
 {
-  "version": 1,
+  "version": 2,
   "vehicle": "BMW R1200GS (K25)",
-  "byte_base": 1,
-  "_byte_base": "Which data[] index D1 refers to. 1 => D1 is data[0]. The source table uses D1..D7 and never D0 or D8, so this is ambiguous; if decoded values are nonsense (idle RPM should be ~1000-1100), set this to 0 so D1 becomes data[1].",
-  "_extraction": "bytes[] is little-endian, least-significant first: (D3*256+D2) is bytes:[2,3]. nibble is 'high' or 'low'. value = raw*scale + offset. map keys are uppercase hex of the extracted value. deadband/min_ms suppress chatter on analog signals.",
+  "byte_base": 0,
+  "_byte_base": "Dn is data[n]. The source table is the community BMW Motorrad CAN sheet, whose Key tab defines the payload as D0..D7; its 2013 ancestor numbered the same fields byte1..byte8, and the K25 Arduino sniffer built from that ancestor reads heated grips from data[7] and throttle from data[1], which is D7 and D1 here. Set to 1 only for a table written with D1 meaning data[0].",
+  "_sources": [
+    "https://docs.google.com/spreadsheets/d/1tUrOES5fQZa92Robr6uP8v2dzQDq9ohHjUiTU3isqdc (BMW Motorrad CAN messages, Keith Conger et al.)",
+    "https://github.com/4G-Gregg/BMW-GS-CAN-Sniffer (2010 R1200GS, Arduino; Event_Printer.ino is the ground truth for what actually ran on a K25)"
+  ],
+  "_extraction": "bytes[] is little-endian, least-significant first: (D3*256+D2) is bytes:[2,3]. nibble is 'high' or 'low'. value = raw*scale + offset. map keys are uppercase hex of the extracted value; 'default' labels any code not in the map, otherwise it reports as unmapped_0xNN. deadband/min_ms suppress chatter on analog signals.",
   "frames": {
     "10C": {
       "name": "engine",
@@ -11,36 +15,41 @@
         {"name": "throttle_valve_pct", "bytes": [1], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300},
         {"name": "rpm", "bytes": [2, 3], "scale": 0.25, "unit": "rpm", "decimals": 0, "deadband": 25, "min_ms": 500},
         {"name": "clutch_kill", "bytes": [4], "nibble": "high",
-         "map": {"A": "clutch_in", "6": "clutch_out", "5": "kill_switch_on"}},
+         "map": {"A": "clutch_in", "6": "clutch_out", "5": "kill_switch_on"},
+         "_note": "Both sheet generations say the HIGH nibble of D4. The Arduino sniffer reads the LOW nibble of data[4] for the same 6/A values. Unresolved: pull the clutch and watch which nibble of D4 moves in /can/dump."},
         {"name": "side_stand", "bytes": [5], "nibble": "high",
          "map": {"5": "up", "9": "down"}},
         {"name": "asc_abs", "bytes": [5], "nibble": "low",
-         "map": {"5": "off", "6": "on"}},
+         "map": {"5": "off", "6": "on"},
+         "_note": "Sheet and Arduino sniffer agree: low nibble of D5, 5/6."},
         {"name": "throttle_pct", "bytes": [6], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300,
-         "_note": "Source says D6(High Nibble) but gives DEC(D6)/255*100; /255 implies the whole byte, so the whole byte is used. Verify against throttle_valve_pct."}
+         "_note": "The current sheet says D6(High Nibble) with a /255 formula. The 2013 sheet listed this as whole byte 7 (D6) with the same formula and the K50 row uses a whole byte too; the nibble label is a later transcription slip. Whole byte used. Should track throttle_valve_pct."}
       ]
     },
     "130": {
       "name": "lights",
       "signals": [
         {"name": "high_beam", "bytes": [6], "nibble": "low",
-         "map": {"9": "on", "A": "off"}},
+         "map": {"9": "on", "A": "off"},
+         "_note": "Confirmed by the Arduino sniffer: LO_NIBBLE(data[6]), 9 on / A off."},
         {"name": "turn_signals", "bytes": [7],
-         "map": {"CF": "off", "D7": "left", "E7": "right", "EF": "both"}}
+         "map": {"CF": "off", "D7": "left", "E7": "right", "EF": "both"},
+         "_note": "Confirmed by the Arduino sniffer: whole data[7]."}
       ]
     },
     "294": {
       "name": "front_wheel",
       "signals": [
         {"name": "abs", "bytes": [1], "nibble": "low",
-         "map": {"5": "on", "B": "off"}},
+         "map": {"5": "on", "B": "off"},
+         "_note": "Sheet says LOW nibble of D1. The Arduino sniffer reads HI_NIBBLE(data[1]) for the same 5/B values. Unresolved; cycle ABS off and watch D1."},
         {"name": "front_wheel_speed_kmh", "bytes": [2, 3], "scale": 0.06, "unit": "km/h", "decimals": 1, "deadband": 0.5, "min_ms": 500,
-         "_note": "Source gives this scale as approximate (~0.06); the rear equivalent on 2A8 is exact. Calibrate against GPS."},
+         "_note": "The ~0.06 dates from the original 2013 entry and was never firmed up. No GPS needed: at steady speed in a straight line front and rear must agree, so scale = 0.06 * rear_raw / front_raw. Adjust here once measured."},
         {"name": "front_distance_m", "bytes": [4, 5], "scale": 0.03775, "unit": "m", "decimals": 2, "deadband": 10, "min_ms": 2000},
         {"name": "brake_levers", "bytes": [6],
          "map": {"03": "off", "07": "front", "0B": "rear", "0F": "both",
                  "00": "off", "04": "front", "08": "rear", "0C": "both"},
-         "_note": "Two encodings: static values (03/07/0B/0F) and, after two full wheel revolutions, in-motion values (00/04/08/0C). Both folded into one map since the values do not collide."}
+         "_note": "Two encodings: static values (03/07/0B/0F) and, after two full wheel revolutions, in-motion values (00/04/08/0C). Both folded into one map since the values do not collide. The Arduino sniffer reads the low nibble with 3/7/B, which is the same thing."}
       ]
     },
     "2A8": {
@@ -55,7 +64,8 @@
       "signals": [
         {"name": "engine_temp_c", "bytes": [2], "scale": 0.75, "offset": -24, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000},
         {"name": "gear", "bytes": [5], "nibble": "high",
-         "map": {"1": "1", "2": "N", "4": "2", "7": "3", "8": "4", "B": "5", "D": "6", "F": "between"}},
+         "map": {"1": "1", "2": "N", "4": "2", "7": "3", "8": "4", "B": "5", "D": "6", "F": "between"},
+         "_note": "The 2013 sheet said the LOW nibble; the current sheet says HIGH, attributed to eight models including the K25, and assigns the low nibble to an oil-level fault flag. High nibble used."},
         {"name": "air_temp_c", "bytes": [7], "scale": 0.75, "offset": -48, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000}
       ]
     },
@@ -77,12 +87,14 @@
                  "7,1": "soft_smooth", "7,2": "norm_smooth", "7,3": "hard_smooth",
                  "7,4": "soft_uneven", "7,5": "norm_uneven", "7,6": "hard_uneven"}},
         {"name": "info_button", "bytes": [5], "nibble": "low",
-         "map": {"4": "off", "5": "short_press", "6": "long_press"}},
+         "map": {"4": "off", "5": "short_press", "6": "long_press"},
+         "_note": "Confirmed by the Arduino sniffer: LO_NIBBLE(data[5]), 5 short / 6 long."},
         {"name": "heated_grips", "bytes": [7], "nibble": "high",
-         "map": {"C": "off", "D": "low", "E": "high"}},
+         "map": {"C": "off", "D": "low", "E": "high", "F": "unavailable"},
+         "_note": "Confirmed by the Arduino sniffer: HI_NIBBLE(data[7]), C/D/E. F is the whole-byte FF the ZFE sends with the ignition off, so it is labelled rather than reported as unmapped."},
         {"name": "ignition", "bytes": [7],
-         "map": {"FF": "off", "DF": "on"},
-         "_note": "Source claims D7(High Nibble) but lists whole-byte values FF/DF, and DF's high nibble D collides with heated_grips 'low'. Encoded as the whole byte. If heated_grips and ignition disagree on the bike, this pair is what to re-check."}
+         "map": {"FF": "off"}, "default": "on",
+         "_note": "The sheet's FF=Off/DF=On row was contributed for the K25 and F800GSA and its 'DF' is simply the grips-low value with a fixed low nibble; it does not contradict heated_grips, it observed the same byte with the grips on low. Encoded as: FF means off, any other value means on."}
       ]
     },
     "32F": {
@@ -109,7 +121,8 @@
       "name": "cluster",
       "signals": [
         {"name": "ambient_light", "bytes": [1], "nibble": "low",
-         "map": {"B": "dark", "7": "light"}},
+         "map": {"B": "dark", "7": "light"},
+         "_note": "Sheet: B dark, 7 light, 3 and F unknown. The Arduino sniffer used 7 dark, 3 light. Unmapped codes will surface as unmapped_0xN; record what the bike sends in the dark and in sunlight."},
         {"name": "counter", "bytes": [3, 4], "decimals": 0, "deadband": 1, "min_ms": 2000,
          "_note": "Purpose unidentified in the source table."},
         {"name": "odometer_km_alt", "bytes": [5, 6, 7], "unit": "km", "decimals": 0, "deadband": 1, "min_ms": 10000,
@@ -120,7 +133,7 @@
       "name": "unknown",
       "signals": [
         {"name": "countdown", "bytes": [6], "decimals": 0,
-         "_note": "Source lists no formula (NaN). Raw byte, published for identification."}
+         "_note": "Source lists no formula. Raw byte, published for identification."}
       ]
     }
   }

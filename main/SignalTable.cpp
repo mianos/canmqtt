@@ -59,7 +59,7 @@ bool SignalTable::loadJson(const std::string& json, std::string& errorOut) {
         return false;
     }
 
-    const int base = (int)numberOr(root, "byte_base", 1);
+    const int base = (int)numberOr(root, "byte_base", 0);
     if (base != 0 && base != 1) {
         errorOut = "byte_base must be 0 or 1";
         cJSON_Delete(root);
@@ -139,6 +139,7 @@ bool SignalTable::loadJson(const std::string& json, std::string& errorOut) {
                         sd.map[m->string] = m->valuestring;
                     }
                 }
+                sd.mapDefault = stringOr(sigJson, "default", "");
             }
 
             if (sd.bytes.empty() && sd.parts.empty()) continue;
@@ -225,8 +226,12 @@ std::vector<DecodedSignal> SignalTable::decode(const CanFrame& f) {
             auto m = s.map.find(key);
             // An unmapped code is still worth surfacing -- it means the bike is
             // using a value the table does not know about, which is exactly the
-            // kind of gap this project exists to close.
-            const std::string text = (m != s.map.end()) ? m->second : ("unmapped_0x" + key);
+            // kind of gap this project exists to close. A signal may opt out
+            // with "default" when only one code is distinctive (ignition: FF
+            // is off, anything else is on).
+            const std::string text = (m != s.map.end()) ? m->second
+                                   : !s.mapDefault.empty() ? s.mapDefault
+                                   : ("unmapped_0x" + key);
             if (s.haveLast && text == s.lastText) continue;
             if (s.haveLast && s.minMs &&
                 (now - s.lastPubUs) < (uint64_t)s.minMs * 1000ULL) continue;
@@ -361,9 +366,28 @@ bool write(const std::string& s, std::string& errorOut) {
     return true;
 }
 
+namespace {
+int tableVersion(const std::string& json) {
+    cJSON* root = cJSON_Parse(json.c_str());
+    if (root == nullptr) return -1;
+    const int v = (int)numberOr(root, "version", 0);
+    cJSON_Delete(root);
+    return v;
+}
+}  // namespace
+
 bool ensureDefault(std::string& errorOut) {
-    if (!read().empty()) return true;
-    ESP_LOGW(TAG, "no stored table; writing the built-in default");
+    const std::string stored = read();
+    if (stored.empty()) {
+        ESP_LOGW(TAG, "no stored table; writing the built-in default");
+        return write(defaultJson(), errorOut);
+    }
+    // A reflash carries table corrections with it, but never regresses a
+    // table someone uploaded with a higher version than the build's.
+    const int have = tableVersion(stored);
+    const int want = tableVersion(defaultJson());
+    if (have >= want) return true;
+    ESP_LOGW(TAG, "stored table is version %d, firmware ships %d; replacing it", have, want);
     return write(defaultJson(), errorOut);
 }
 

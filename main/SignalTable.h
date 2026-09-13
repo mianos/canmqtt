@@ -24,7 +24,9 @@ struct DecodedSignal {
 // air as IDs are confirmed on the bike — without a firmware rebuild.
 //
 // Schema (see data/signals.json):
-//   byte_base      which data[] index "D1" means; 1 => D1 is data[0]
+//   version        integer; a newer embedded default replaces a stored table
+//   byte_base      which data[] index "D1" means; 0 => Dn is data[n] (the
+//                  community sheet's convention), 1 => D1 is data[0]
 //   frames.<ID>.signals[]
 //     bytes[]      little-endian byte list, least-significant first:
 //                  (D3*256 + D2) is [2,3]
@@ -33,6 +35,7 @@ struct DecodedSignal {
 //                  (the ESA damping pair); joined with "," to index map
 //     scale/offset value = raw * scale + offset
 //     map{}        uppercase-hex key -> label; presence makes it an enum
+//     default      label for any code missing from map (else unmapped_0xNN)
 //     deadband     suppress numeric reports smaller than this
 //     min_ms       per-signal floor between reports
 //
@@ -80,6 +83,7 @@ private:
         uint32_t minMs  = 0;
         std::vector<Part> parts;                             // composite key
         std::unordered_map<std::string, std::string> map;    // enum
+        std::string mapDefault;                              // "" => unmapped_0xNN
 
         // Last reported state.
         bool        haveLast  = false;
@@ -100,13 +104,15 @@ private:
 
     mutable SemaphoreHandle_t lock_;
     std::unordered_map<uint32_t, FrameDef> frames_;
-    int  byteBase_ = 1;
+    int  byteBase_ = 0;
     bool loaded_   = false;
 };
 
 // Storage for the decode table: a SPIFFS partition holding signals.json.
 // mount() formats on first use; ensureDefault() writes the firmware's built-in
-// copy if the file is missing, so a fresh board decodes without an upload.
+// copy if the file is missing or carries a lower "version" than the build,
+// so a fresh board decodes without an upload and a reflash carries table
+// corrections with it. Bump "version" in an uploaded table to protect it.
 namespace signalstore {
 bool        mount();
 std::string read();                       // "" if absent/unreadable
