@@ -113,6 +113,7 @@ Publishes — `tele/mqttcan/…`:
 | Topic | Content |
 |---|---|
 | `frame` | `{"id":"0x2BC","ext":false,"dlc":8,"data":"DEADBEEF00000000","chg":"0C","t_us":…}` on each accepted change |
+| `signals` | decoded named values, e.g. `{"id":"0x2BC","engine_temp_c":88.5,"gear":"N"}` |
 | `stats` | bus health, 1/min — the bit-rate diagnostic |
 | `init`, `status` | identity + uptime/heap |
 | `settingsack` | full settings after a `settings` command |
@@ -123,11 +124,79 @@ Publishes — `tele/mqttcan/…`:
 |---|---|
 | `GET /can/ids` | **the per-ID table — the main discovery view** |
 | `GET /can/dump?limit=N` | recent raw frames as `candump` text |
+| `GET /signals` | the decode table in use |
+| `POST /signals` | replace it (validated before storing) |
+| `GET /signals/status` | loaded?, byte_base, frame/signal counts, known IDs |
 | `GET /can/status` | bit rate, error state, counters |
 | `POST /can/reset` | clear table + ring |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
 | `GET`/`POST /firmware` | OTA (raw `.bin` body) |
 | `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base |
+
+## Decoding: named signals
+
+Raw hex is for discovery; once an ID is understood it should report as a named
+value. `data/signals.json` describes how, and lives on its own SPIFFS partition
+so the mapping can be corrected **over the air** as IDs are confirmed against
+the bike — no firmware rebuild. The firmware embeds a copy and writes it out on
+first boot, so a freshly flashed board decodes immediately.
+
+```sh
+curl http://<host>/signals/status    # loaded? how many frames/signals? which IDs?
+curl http://<host>/signals           # the table currently in use
+curl --data-binary @data/signals.json http://<host>/signals   # replace it
+```
+
+An upload is **parsed and applied before it is written to flash**: a table that
+does not load is rejected with the parse error and nothing is stored, so a bad
+edit cannot leave the device unable to decode after a reboot.
+
+Decoded values publish to `tele/<name>/signals` as a flat object of whatever
+changed in that frame:
+
+```json
+{"id":"0x2BC","engine_temp_c":88.5,"gear":"N"}
+```
+
+Reporting is change-driven, independent of the raw-frame filter: an enum reports
+when its label changes, a number when it moves further than its `deadband`, and
+both respect a per-signal `min_ms`. That is what stops `rpm` from flooding the
+broker while still reporting `gear` the instant it shifts. A code that is not in
+a signal's `map` reports as `unmapped_0xNN` rather than being dropped — an
+unknown code is exactly the kind of gap this project exists to close.
+
+### Schema
+
+| key | meaning |
+|---|---|
+| `byte_base` | which `data[]` index `D1` means; `1` ⇒ `D1` is `data[0]` |
+| `bytes[]` | little-endian byte list, least-significant first: `(D3*256+D2)` is `[2,3]` |
+| `nibble` | `"high"` / `"low"` / absent |
+| `parts[]` | `{byte, nibble}` list, for keys built from several nibbles (ESA damping); joined with `,` |
+| `scale`, `offset` | `value = raw * scale + offset` |
+| `map{}` | uppercase-hex key → label; its presence makes the signal an enum |
+| `deadband`, `min_ms` | suppress chatter on analog signals |
+
+### Caveats in the source table
+
+The table was transcribed from community reverse-engineering, and three entries
+are self-contradictory. Each is encoded as described and flagged with a `_note`
+in the JSON:
+
+- **Byte indexing is ambiguous.** The source uses `D1`–`D7` and never `D0` or
+  `D8`, so `D1` is either `data[0]` or `data[1]`. Default is `byte_base: 1`
+  (`D1` = `data[0]`). **Verify this first** — idle RPM on `10C` should read
+  ~1000–1100. If everything is nonsense, set `byte_base: 0` and re-upload.
+- **`2D0` D7 is claimed twice**: heated grips (high nibble `C`/`D`/`E`) *and*
+  ignition (`FF`/`DF`, which are whole bytes, and `DF`'s high nibble collides
+  with grips-low). Ignition is encoded as the whole byte.
+- **`10C` throttle position** says `D6(High Nibble)` but gives
+  `DEC(D6)/255*100`; `/255` implies 8 bits, so the whole byte is used. Compare
+  against `throttle_valve_pct`, which should track it.
+
+Front wheel speed on `294` is given with an approximate scale (`~0.06`) where
+the rear on `2A8` is exact — calibrate against GPS. Treat every mapping as a
+hypothesis until you have confirmed it on your own bike.
 
 ## Decoding workflow
 
@@ -248,9 +317,11 @@ the sizing above stays honest, and the queue's placement is logged at startup.
 | `main/main.cpp` | wiring: Wi-Fi, MQTT, tasks, settings hooks, self-test injector |
 | `main/CanBus.{h,cpp}` | TWAI node, listen-only, ISR → queue → worker task |
 | `main/FrameTable.{h,cpp}` | per-ID table, change detection, dump ring, report bodies |
+| `main/SignalTable.{h,cpp}` | JSON decode table, per-signal change detection, SPIFFS store |
+| `data/signals.json` | the decode table (embedded as the built-in default) |
 | `main/CanWebServer.{h,cpp}` | HTTP surface on the shared `WebServer` base |
 | `main/Settings.h` | schema on mianesp's `SettingsBase` |
-| `partitions.csv` | 16MB, dual 3MB OTA slots |
+| `partitions.csv` | 16MB, dual 3MB OTA slots + 256KB `signals` SPIFFS |
 
 ## Sources
 

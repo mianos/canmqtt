@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "vehicle": "BMW R1200GS (K25)",
+  "byte_base": 1,
+  "_byte_base": "Which data[] index D1 refers to. 1 => D1 is data[0]. The source table uses D1..D7 and never D0 or D8, so this is ambiguous; if decoded values are nonsense (idle RPM should be ~1000-1100), set this to 0 so D1 becomes data[1].",
+  "_extraction": "bytes[] is little-endian, least-significant first: (D3*256+D2) is bytes:[2,3]. nibble is 'high' or 'low'. value = raw*scale + offset. map keys are uppercase hex of the extracted value. deadband/min_ms suppress chatter on analog signals.",
+  "frames": {
+    "10C": {
+      "name": "engine",
+      "signals": [
+        {"name": "throttle_valve_pct", "bytes": [1], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300},
+        {"name": "rpm", "bytes": [2, 3], "scale": 0.25, "unit": "rpm", "decimals": 0, "deadband": 25, "min_ms": 500},
+        {"name": "clutch_kill", "bytes": [4], "nibble": "high",
+         "map": {"A": "clutch_in", "6": "clutch_out", "5": "kill_switch_on"}},
+        {"name": "side_stand", "bytes": [5], "nibble": "high",
+         "map": {"5": "up", "9": "down"}},
+        {"name": "asc_abs", "bytes": [5], "nibble": "low",
+         "map": {"5": "off", "6": "on"}},
+        {"name": "throttle_pct", "bytes": [6], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300,
+         "_note": "Source says D6(High Nibble) but gives DEC(D6)/255*100; /255 implies the whole byte, so the whole byte is used. Verify against throttle_valve_pct."}
+      ]
+    },
+    "130": {
+      "name": "lights",
+      "signals": [
+        {"name": "high_beam", "bytes": [6], "nibble": "low",
+         "map": {"9": "on", "A": "off"}},
+        {"name": "turn_signals", "bytes": [7],
+         "map": {"CF": "off", "D7": "left", "E7": "right", "EF": "both"}}
+      ]
+    },
+    "294": {
+      "name": "front_wheel",
+      "signals": [
+        {"name": "abs", "bytes": [1], "nibble": "low",
+         "map": {"5": "on", "B": "off"}},
+        {"name": "front_wheel_speed_kmh", "bytes": [2, 3], "scale": 0.06, "unit": "km/h", "decimals": 1, "deadband": 0.5, "min_ms": 500,
+         "_note": "Source gives this scale as approximate (~0.06); the rear equivalent on 2A8 is exact. Calibrate against GPS."},
+        {"name": "front_distance_m", "bytes": [4, 5], "scale": 0.03775, "unit": "m", "decimals": 2, "deadband": 10, "min_ms": 2000},
+        {"name": "brake_levers", "bytes": [6],
+         "map": {"03": "off", "07": "front", "0B": "rear", "0F": "both",
+                 "00": "off", "04": "front", "08": "rear", "0C": "both"},
+         "_note": "Two encodings: static values (03/07/0B/0F) and, after two full wheel revolutions, in-motion values (00/04/08/0C). Both folded into one map since the values do not collide."}
+      ]
+    },
+    "2A8": {
+      "name": "rear_wheel",
+      "signals": [
+        {"name": "rear_wheel_speed_kmh", "bytes": [2, 3], "scale": 0.06, "unit": "km/h", "decimals": 1, "deadband": 0.5, "min_ms": 500},
+        {"name": "rear_distance_m", "bytes": [4, 5], "scale": 0.03775, "unit": "m", "decimals": 2, "deadband": 10, "min_ms": 2000}
+      ]
+    },
+    "2BC": {
+      "name": "engine_status",
+      "signals": [
+        {"name": "engine_temp_c", "bytes": [2], "scale": 0.75, "offset": -24, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000},
+        {"name": "gear", "bytes": [5], "nibble": "high",
+         "map": {"1": "1", "2": "N", "4": "2", "7": "3", "8": "4", "B": "5", "D": "6", "F": "between"}},
+        {"name": "air_temp_c", "bytes": [7], "scale": 0.75, "offset": -48, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000}
+      ]
+    },
+    "2D0": {
+      "name": "body",
+      "signals": [
+        {"name": "ambient_air_temp_c", "bytes": [1], "scale": 0.5, "offset": -40, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000},
+        {"name": "lamp_fault", "bytes": [2], "nibble": "low",
+         "map": {"0": "none", "1": "low_beam", "4": "high_beam", "8": "signals"}},
+        {"name": "fuel_to_reserve_pct", "bytes": [3], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 10000},
+        {"name": "esa_preload", "bytes": [4], "nibble": "high",
+         "map": {"1": "comf_1helm", "2": "norm_1helm", "3": "sport_1helm",
+                 "4": "comf_1helm_bag", "5": "norm_1helm_bag", "6": "sport_1helm_bag",
+                 "7": "comf_2helm", "8": "norm_2helm", "9": "sport_2helm"}},
+        {"name": "esa_damping",
+         "parts": [{"byte": 4, "nibble": "low"}, {"byte": 7, "nibble": "low"}],
+         "map": {"B,1": "soft_smooth", "B,2": "norm_smooth", "B,3": "hard_smooth",
+                 "B,4": "soft_uneven", "B,5": "norm_uneven", "B,6": "hard_uneven",
+                 "7,1": "soft_smooth", "7,2": "norm_smooth", "7,3": "hard_smooth",
+                 "7,4": "soft_uneven", "7,5": "norm_uneven", "7,6": "hard_uneven"}},
+        {"name": "info_button", "bytes": [5], "nibble": "low",
+         "map": {"4": "off", "5": "short_press", "6": "long_press"}},
+        {"name": "heated_grips", "bytes": [7], "nibble": "high",
+         "map": {"C": "off", "D": "low", "E": "high"}},
+        {"name": "ignition", "bytes": [7],
+         "map": {"FF": "off", "DF": "on"},
+         "_note": "Source claims D7(High Nibble) but lists whole-byte values FF/DF, and DF's high nibble D collides with heated_grips 'low'. Encoded as the whole byte. If heated_grips and ignition disagree on the bike, this pair is what to re-check."}
+      ]
+    },
+    "32F": {
+      "name": "tyre_pressure",
+      "signals": [
+        {"name": "rdc_front_bar", "bytes": [6], "scale": 0.02, "unit": "bar", "decimals": 2, "deadband": 0.05, "min_ms": 10000},
+        {"name": "rdc_rear_bar", "bytes": [7], "scale": 0.02, "unit": "bar", "decimals": 2, "deadband": 0.05, "min_ms": 10000}
+      ]
+    },
+    "33F": {
+      "name": "security",
+      "signals": [
+        {"name": "theft_protection", "bytes": [2], "nibble": "low",
+         "map": {"C": "on", "D": "off"}}
+      ]
+    },
+    "3F8": {
+      "name": "odometer",
+      "signals": [
+        {"name": "odometer_km", "bytes": [1, 2, 3], "unit": "km", "decimals": 0, "deadband": 1, "min_ms": 10000}
+      ]
+    },
+    "3FF": {
+      "name": "cluster",
+      "signals": [
+        {"name": "ambient_light", "bytes": [1], "nibble": "low",
+         "map": {"B": "dark", "7": "light"}},
+        {"name": "counter", "bytes": [3, 4], "decimals": 0, "deadband": 1, "min_ms": 2000,
+         "_note": "Purpose unidentified in the source table."},
+        {"name": "odometer_km_alt", "bytes": [5, 6, 7], "unit": "km", "decimals": 0, "deadband": 1, "min_ms": 10000,
+         "_note": "Second odometer copy; cross-check against 3F8 odometer_km."}
+      ]
+    },
+    "7BE": {
+      "name": "unknown",
+      "signals": [
+        {"name": "countdown", "bytes": [6], "decimals": 0,
+         "_note": "Source lists no formula (NaN). Raw byte, published for identification."}
+      ]
+    }
+  }
+}

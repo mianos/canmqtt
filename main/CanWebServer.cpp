@@ -17,6 +17,7 @@
 
 #include "CanBus.h"
 #include "FrameTable.h"
+#include "SignalTable.h"
 #include "Settings.h"
 #include "WifiManager.h"
 
@@ -28,6 +29,10 @@ constexpr const char* TAG = "canweb";
 // trigger a multi-GB std::string allocation. /firmware has its own bound (the
 // OTA partition size).
 constexpr size_t kMaxJsonBodyBytes = 4 * 1024;
+
+// The decode table is a whole document rather than a settings patch, so it gets
+// its own (larger) bound. Still far below the 256KB partition.
+constexpr size_t kMaxSignalsBytes = 64 * 1024;
 
 std::string read_request_body(httpd_req_t* req) {
     std::string body;
@@ -61,8 +66,9 @@ size_t query_limit(httpd_req_t* req, size_t fallback) {
 
 }  // namespace
 
-CanWebServer::CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table)
-    : WebServer(ctx), settings_(settings), bus_(bus), table_(table) {}
+CanWebServer::CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
+                           SignalTable& signals)
+    : WebServer(ctx), settings_(settings), bus_(bus), table_(table), signals_(signals) {}
 
 esp_err_t CanWebServer::start() {
     esp_err_t r = WebServer::start();
@@ -73,7 +79,7 @@ esp_err_t CanWebServer::start() {
         httpd_method_t method;
         esp_err_t (*handler)(httpd_req_t*);
     };
-    const std::array<Route, 9> routes = {{
+    const std::array<Route, 12> routes = {{
         {"/firmware",    HTTP_POST, firmware_post_handler},
         {"/firmware",    HTTP_GET,  firmware_get_handler},
         {"/config",      HTTP_GET,  config_get_handler},
@@ -83,6 +89,9 @@ esp_err_t CanWebServer::start() {
         {"/can/dump",    HTTP_GET,  can_dump_get_handler},
         {"/can/status",  HTTP_GET,  can_status_get_handler},
         {"/can/reset",   HTTP_POST, can_reset_post_handler},
+        {"/signals",        HTTP_GET,  signals_get_handler},
+        {"/signals",        HTTP_POST, signals_post_handler},
+        {"/signals/status", HTTP_GET,  signals_status_get_handler},
     }};
 
     for (const Route& route : routes) {
@@ -307,4 +316,80 @@ esp_err_t CanWebServer::can_reset_post_handler(httpd_req_t* req) {
     JsonWrapper resp;
     resp.AddItem("status", std::string("cleared"));
     return send_json(req, resp);
+}
+
+// GET /signals — the decode table as stored. Served straight off the
+// filesystem rather than re-serialised from the parsed form, so what you read
+// back is byte-for-byte what is in use, comments and all.
+esp_err_t CanWebServer::signals_get_handler(httpd_req_t* req) {
+    std::string body = signalstore::read();
+    if (body.empty()) return sendJsonError(req, 404, "no decode table stored");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, body.c_str());
+}
+
+// POST /signals — replace the decode table.
+// Deploy: curl --data-binary @data/signals.json http://<host>/signals
+//
+// The upload is parsed and applied BEFORE it is written to flash: a table that
+// does not load is rejected with the parse error and nothing is stored, so a
+// bad edit can never leave the device unable to decode after a reboot.
+esp_err_t CanWebServer::signals_post_handler(httpd_req_t* req) {
+    CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
+    if (req->content_len <= 0) return sendJsonError(req, 400, "empty body");
+    if (req->content_len > kMaxSignalsBytes) return sendJsonError(req, 413, "table too large");
+
+    std::string body;
+    body.reserve(req->content_len);
+    char buf[512];
+    int remaining = req->content_len;
+    while (remaining > 0) {
+        int got = httpd_req_recv(req, buf, std::min<int>(remaining, (int)sizeof(buf)));
+        if (got == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (got <= 0) return sendJsonError(req, 400, "request body truncated");
+        body.append(buf, got);
+        remaining -= got;
+    }
+
+    std::string err;
+    if (!self->signals_.loadJson(body, err)) {
+        ESP_LOGW(TAG, "rejected signals upload: %s", err.c_str());
+        return sendJsonError(req, 400, err);
+    }
+    if (!signalstore::write(body, err)) {
+        // The new table is live but unsaved; say so rather than report success.
+        return sendJsonError(req, 500, "table applied but not saved: " + err);
+    }
+
+    ESP_LOGW(TAG, "decode table replaced: %u frames / %u signals",
+             (unsigned)self->signals_.frameCount(), (unsigned)self->signals_.signalCount());
+    JsonWrapper resp;
+    resp.AddItem("status",  std::string("ok"));
+    resp.AddItem("frames",  (int)self->signals_.frameCount());
+    resp.AddItem("signals", (int)self->signals_.signalCount());
+    resp.AddItem("bytes",   (int)body.size());
+    return send_json(req, resp);
+}
+
+// GET /signals/status — is a table loaded, what does it cover, and which byte
+// convention is it using. The ids list is the quick way to see whether the IDs
+// in the table match the ones /can/ids is actually seeing on the bike.
+esp_err_t CanWebServer::signals_status_get_handler(httpd_req_t* req) {
+    CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
+    std::vector<uint32_t> ids = self->signals_.knownIds();
+    std::sort(ids.begin(), ids.end());
+
+    std::string out = "{\"loaded\":";
+    out += self->signals_.loaded() ? "true" : "false";
+    out += ",\"byte_base\":" + std::to_string(self->signals_.byteBase());
+    out += ",\"frames\":" + std::to_string(self->signals_.frameCount());
+    out += ",\"signals\":" + std::to_string(self->signals_.signalCount());
+    out += ",\"ids\":[";
+    for (size_t i = 0; i < ids.size(); ++i) {
+        if (i) out += ',';
+        out += "\"0x" + canIdHex(ids[i], ids[i] > 0x7FF) + "\"";
+    }
+    out += "]}";
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, out.c_str());
 }

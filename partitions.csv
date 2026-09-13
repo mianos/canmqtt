@@ -6,12 +6,15 @@
 # the first OTA after a wired single-app flash lands in ota_0 via
 # esp_ota_get_next_update_partition().
 #
-# The remaining ~10MB of the 16MB part is deliberately left unallocated — a
-# future frame-log partition (SPIFFS/FAT, for on-device capture to survive a
-# power cycle) can be added without moving nvs or the app slots.
+# "signals" holds signals.json, the CAN decode table, so it can be corrected
+# over the air (POST /signals) without a firmware rebuild. 256KB is far more
+# than the ~8KB table needs, but SPIFFS wants slack to wear-level and the
+# flash is 16MB. The remaining ~9.7MB stays unallocated for a future frame-log
+# partition, addable without moving nvs or the app slots.
 # Name,     Type, SubType, Offset,    Size,     Flags
 nvs,        data, nvs,     0x9000,    0x6000,
 otadata,    data, ota,     0xf000,    0x2000,
 phy_init,   data, phy,     0x11000,   0x1000,
 ota_0,      app,  ota_0,   0x20000,   0x300000,
 ota_1,      app,  ota_1,   0x320000,  0x300000,
+signals,    data, spiffs,  0x620000,  0x40000,

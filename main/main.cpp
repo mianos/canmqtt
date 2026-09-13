@@ -34,9 +34,12 @@
 // Publishes:
 //   tele/<name>/frame   {"id":"0x2BC","ext":...,"dlc":8,"data":"...","chg":"0C",...}
 //                       on each accepted payload change
+//   tele/<name>/signals {"id":"0x2BC","engine_temp_c":88.5,"gear":"N"} — named
+//                       values, whenever one moves past its own deadband
 //   tele/<name>/stats   bus health + rates, 1/min — the bit-rate diagnostic
 //   tele/<name>/init,status   identity + telemetry
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
+//       /signals /signals/status
 
 #include <cinttypes>
 #include <cstring>
@@ -68,6 +71,7 @@
 #include "CanBus.h"
 #include "CanWebServer.h"
 #include "FrameTable.h"
+#include "SignalTable.h"
 
 static const char* TAG = "mqttcan";
 
@@ -86,6 +90,7 @@ struct App {
     WiFiManager* wifi;
     CanBus*      bus   = nullptr;  // set once constructed, later in app_main
     FrameTable*  table = nullptr;
+    SignalTable* signals = nullptr;
 };
 
 std::string uptimeString() {
@@ -126,6 +131,7 @@ esp_err_t handleSettings(MqttClient* client, const std::string&,
 esp_err_t handleCanReset(MqttClient*, const std::string&, const JsonWrapper&, void* ctx) {
     auto* app = static_cast<App*>(ctx);
     if (app->table) app->table->reset();
+    if (app->signals) app->signals->resetState();  // or the next report is suppressed as "unchanged"
     return ESP_OK;
 }
 
@@ -313,6 +319,7 @@ extern "C" void app_main(void) {
     esp_log_level_set("mqttcan", ESP_LOG_INFO);
     esp_log_level_set("canbus", ESP_LOG_INFO);
     esp_log_level_set("frametable", ESP_LOG_INFO);
+    esp_log_level_set("signals", ESP_LOG_INFO);
     esp_log_level_set("settings", ESP_LOG_INFO);
 
     static NvsStorageManager nvs;      // constructing this initialises NVS flash
@@ -392,12 +399,58 @@ extern "C" void app_main(void) {
     static CanBus bus(kCanTx, kCanRx);
     app.bus = &bus;
 
-    const std::string frameTopic = "tele/" + settings.sensorName + "/frame";
+    // Decode table. Lives on its own SPIFFS partition so the mapping can be
+    // corrected over the air as IDs are confirmed on the bike; the firmware
+    // embeds a copy that is written out on first boot, so a fresh board decodes
+    // straight away. A bad table is never fatal -- raw frames keep flowing.
+    static SignalTable signals;
+    app.signals = &signals;
+    if (signalstore::mount()) {
+        std::string err;
+        if (!signalstore::ensureDefault(err)) {
+            ESP_LOGE(TAG, "could not seed signals.json: %s", err.c_str());
+        }
+        const std::string stored = signalstore::read();
+        if (stored.empty()) {
+            ESP_LOGE(TAG, "no decode table; publishing raw frames only");
+        } else if (!signals.loadJson(stored, err)) {
+            ESP_LOGE(TAG, "signals.json rejected (%s); publishing raw frames only",
+                     err.c_str());
+        }
+    } else {
+        ESP_LOGE(TAG, "signals partition unavailable; publishing raw frames only");
+    }
+
+    const std::string frameTopic  = "tele/" + settings.sensorName + "/frame";
+    const std::string signalTopic = "tele/" + settings.sensorName + "/signals";
 
     // Runs on the CanBus worker task, once per received frame. Publishing is
     // gated by FrameTable::observe() so a 500kbit/s firehose becomes a trickle
     // of actual state changes.
-    auto onFrame = [frameTopic](const CanFrame& f) {
+    auto onFrame = [frameTopic, signalTopic](const CanFrame& f) {
+        // Decode first, and for every frame — not just the ones that survive the
+        // raw-frame filter. The two policies are independent: a signal has its
+        // own deadband and min_ms, and gating it behind publish_min_ms would
+        // drop real state changes just because the raw frame was throttled.
+        if (settings.publishEnable && signals.loaded()) {
+            std::vector<DecodedSignal> changed = signals.decode(f);
+            if (!changed.empty()) {
+                JsonWrapper sd;
+                sd.AddItem("id", "0x" + canIdHex(f.id, f.ext));
+                for (const DecodedSignal& ds : changed) {
+                    if (ds.isEnum) sd.AddItem(*ds.name, ds.text);
+                    else           sd.AddItem(*ds.name, ds.value);
+                    if (settings.logFrames) {
+                        ESP_LOGI(TAG, "  %s = %s%s", ds.name->c_str(),
+                                 ds.isEnum ? ds.text.c_str()
+                                           : std::to_string(ds.value).c_str(),
+                                 ds.unit->empty() ? "" : ds.unit->c_str());
+                    }
+                }
+                mqtt.publish(signalTopic, sd.ToString());
+            }
+        }
+
         uint8_t chg = 0;
         const bool publish = table.observe(f, settings.publishMinMs,
                                            settings.publishHeartbeatMs, &chg);
@@ -463,7 +516,7 @@ extern "C" void app_main(void) {
     // Web server: /healthz, /reset, /set_hostname plus /firmware, /config,
     // /config/reset, /can/ids, /can/dump, /can/status, /can/reset.
     static WebContext webctx(&wifi);
-    static CanWebServer web(&webctx, settings, bus, table);
+    static CanWebServer web(&webctx, settings, bus, table, signals);
     web.start();
 
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);
