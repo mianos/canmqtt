@@ -118,6 +118,78 @@ Publishes — `tele/mqttcan/…`:
 | `init`, `status` | identity + uptime/heap |
 | `settingsack` | full settings after a `settings` command |
 
+### Watching it with mosquitto
+
+`brew install mosquitto` (or your distro's `mosquitto-clients`). These assume:
+
+```sh
+export B=mqtt2.mianos.com
+export N=mqttcan
+```
+
+Everything the board says, topic shown per line. Start here when you first plug
+into the bike:
+
+```sh
+mosquitto_sub -h $B -v -t "tele/$N/#"
+```
+
+Decoded signals only:
+
+```sh
+mosquitto_sub -h $B -t "tele/$N/signals" | jq -c .
+```
+
+Raw frames narrowed to one ID — this is what you want while correlating an
+action with a frame, e.g. pulling the clutch and watching `10C`:
+
+```sh
+mosquitto_sub -h $B -t "tele/$N/frame" | jq -c 'select(.id == "0x10C")'
+```
+
+Frames as `candump`-ish text with the changed-byte mask, which is the fastest
+way to see which byte a lever or button lives in:
+
+```sh
+mosquitto_sub -h $B -t "tele/$N/frame" | jq -r '"\(.id)#\(.data) chg=\(.chg)"'
+```
+
+Bus health, once a minute. Rising `rx_errors`/`bus_errors` with no frames means
+the bit rate is wrong; all zeros and no frames means a quiet bus:
+
+```sh
+mosquitto_sub -h $B -t "tele/$N/stats" | jq .
+```
+
+Log a whole ride, with broker timestamps, for decoding afterwards:
+
+```sh
+mosquitto_sub -h $B -v -F '%I %t %p' -t "tele/$N/frame" | tee ride-$(date +%F).log
+```
+
+Commands:
+
+```sh
+# clean baseline before performing exactly one action
+mosquitto_pub -h $B -t "cmnd/$N/canreset" -m '{}'
+
+# live setting change; the ack lands on tele/$N/settingsack
+mosquitto_pub -h $B -t "cmnd/$N/settings" -m '{"can_bitrate":125000}'
+
+# plain reboot — the safe one, unlike HTTP POST /reset
+mosquitto_pub -h $B -t "cmnd/$N/restart" -m '{}'
+```
+
+Watch a command and its effect together:
+
+```sh
+mosquitto_sub -h $B -v -t "tele/$N/signals" -t "tele/$N/settingsack"
+```
+
+Add `-u user -P pass` if the broker wants credentials. Add `-d` to any
+`mosquitto_sub` when a topic looks silent — the SUBACK tells you whether it is a
+broker ACL or the board genuinely not publishing.
+
 ### HTTP
 
 | Route | Purpose |
