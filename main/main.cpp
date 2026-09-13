@@ -39,6 +39,7 @@
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
 
 #include <cinttypes>
+#include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <regex>
@@ -52,6 +53,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -146,6 +148,27 @@ SemaphoreHandle_t s_got_ip = nullptr;
 void onGotIp(void*, esp_event_base_t base, int32_t id, void*) {
     if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP && s_got_ip) {
         xSemaphoreGive(s_got_ip);
+    }
+}
+
+// Wi-Fi association diagnostics. WiFiManager's own disconnect handler just
+// re-calls esp_wifi_connect() without logging, so a device that never joins
+// looks completely silent on the console — which is useless when the thing is
+// bolted to a motorcycle. Log the reason code for every disconnect, and the
+// SSID the driver is actually trying, so a failure names itself.
+void onWifiEvent(void*, esp_event_base_t base, int32_t id, void* data) {
+    if (base != WIFI_EVENT) return;
+    if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        auto* e = static_cast<wifi_event_sta_disconnected_t*>(data);
+        // Common ones: 201 NO_AP_FOUND (wrong SSID, out of range, or 5GHz-only),
+        // 202 AUTH_FAIL / 15 4WAY_HANDSHAKE_TIMEOUT (wrong password),
+        // 205 CONNECTION_FAIL, 3 AUTH_LEAVE.
+        ESP_LOGW(TAG, "wifi disconnected from '%.*s': reason %d",
+                 e->ssid_len, (const char*)e->ssid, e->reason);
+    } else if (id == WIFI_EVENT_STA_CONNECTED) {
+        auto* e = static_cast<wifi_event_sta_connected_t*>(data);
+        ESP_LOGI(TAG, "wifi associated with '%.*s' on channel %d",
+                 e->ssid_len, (const char*)e->ssid, e->channel);
     }
 }
 
@@ -304,6 +327,27 @@ extern "C" void app_main(void) {
     static WiFiManager wifi(nvs, onGotIp, nullptr);
     std::string host = settings.sensorName;
     wifi.configSetHostName(host);
+
+    // Association diagnostics (see onWifiEvent). Registered after WiFiManager
+    // has initialised the Wi-Fi stack and event loop.
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, onWifiEvent, nullptr);
+
+    // Report what the driver actually loaded from NVS. An empty SSID here means
+    // esp_wifi_connect() will fail instantly and silently, which otherwise
+    // presents as "provisioned but nothing ever happens".
+    {
+        wifi_config_t cur = {};
+        if (esp_wifi_get_config(WIFI_IF_STA, &cur) == ESP_OK) {
+            ESP_LOGI(TAG, "wifi sta config: ssid='%s' (%d chars), password %s",
+                     (const char*)cur.sta.ssid,
+                     (int)strlen((const char*)cur.sta.ssid),
+                     cur.sta.password[0] ? "set" : "EMPTY");
+        }
+    }
+
+    // Keep the radio awake, as ws-voice does. Power-save doze between DTIM
+    // beacons adds latency and, on some APs, makes association flaky.
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     setenv("TZ", settings.tz.c_str(), 1);
     tzset();
