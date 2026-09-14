@@ -105,8 +105,13 @@ Commands — `cmnd/mqttcan/…`:
 |---|---|---|
 | `settings` | any subset of the `/config` JSON | apply + persist |
 | `canreset` | `{}` | clear the frame table + dump ring |
+| `mark` | `{"text":"test high beam"}`, optionally `"reset":true` | label the capture — see [Test annotations](#test-annotations) |
 | `restart` | `{}` | reboot |
 | `reprovision` | `{}` | clear Wi-Fi creds, reboot into ESP-Touch v2 |
+
+Every command payload must be a **JSON object**. The shared `MqttClient` parses
+each message and discards anything that is not one before a handler runs, so
+publishing bare text to `cmnd/mqttcan/mark` does nothing at all, silently.
 
 Publishes — `tele/mqttcan/…`:
 
@@ -114,6 +119,7 @@ Publishes — `tele/mqttcan/…`:
 |---|---|
 | `frame` | `{"id":"0x2BC","ext":false,"dlc":8,"data":"DEADBEEF00000000","chg":"0C","t_us":…}` on each accepted change |
 | `signals` | decoded named values, e.g. `{"id":"0x2BC","engine_temp_c":88.5,"gear":"N"}` |
+| `mark` | `{"seq":7,"text":"test high beam","reset":false,"up_ms":1234567}` |
 | `stats` | bus health, 1/min — the bit-rate diagnostic |
 | `init`, `status` | identity + uptime/heap |
 | `settingsack` | full settings after a `settings` command |
@@ -167,9 +173,19 @@ Log a whole ride, with broker timestamps, for decoding afterwards:
 mosquitto_sub -h $B -v -F '%I %t %p' -t "tele/$N/frame" | tee ride-$(date +%F).log
 ```
 
+Labels alongside the frames they explain, which is the capture you want when
+something else has to reconstruct what you were doing:
+
+```sh
+mosquitto_sub -h $B -v -t "tele/$N/mark" -t "tele/$N/frame"
+```
+
 Commands:
 
 ```sh
+# label the capture; add "reset":true to clear the table in the same call
+mosquitto_pub -h $B -t "cmnd/$N/mark" -m '{"text":"test high beam"}'
+
 # clean baseline before performing exactly one action
 mosquitto_pub -h $B -t "cmnd/$N/canreset" -m '{}'
 
@@ -200,7 +216,8 @@ broker ACL or the board genuinely not publishing.
 | `POST /signals` | replace it (validated before storing) |
 | `GET /signals/status` | loaded?, byte_base, frame/signal counts, known IDs |
 | `GET /can/status` | bit rate, error state, counters |
-| `POST /can/reset` | clear table + ring |
+| `POST /can/reset` | clear table + ring (and decode state) |
+| `POST /can/mark` | label the capture; `{"text":"…"[,"reset":true]}` |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
 | `GET`/`POST /firmware` | OTA (raw `.bin` body) |
 | `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base. **`/reset` wipes the Wi-Fi credentials** and reboots into provisioning; it is not a restart. To reboot after a setting that needs one, use `cmnd/<name>/restart` over MQTT or power-cycle |
@@ -289,6 +306,55 @@ Front wheel speed on `294` has carried `~0.06` since 2013 while the rear on
 the two wheels must agree, so `scale = 0.06 × rear_raw / front_raw`. Treat every
 mapping as a hypothesis until you have confirmed it on your own bike.
 
+## Test annotations
+
+Decoding is correlation, so a capture is only as good as the record of what you
+were doing while it was taken. Push a label just before each action and it lands
+in the capture next to the frames it explains:
+
+```sh
+curl -X POST -d '{"text":"test high beam"}' http://mqttcan.local/can/mark
+```
+
+The label goes two places. It publishes on `tele/mqttcan/mark`, interleaved with
+`frame` and `signals` in a subscriber's stream, and it is kept in a 32-entry ring
+that `GET /can/dump` merges inline:
+
+```
+(1234.567890) can0 130#CF00000000000000
+# MARK 7 test high beam
+(1234.612340) can0 130#D700000000000000
+```
+
+That is the form to hand an LLM when asking it to confirm a mapping: the label
+and the frames it caused are in one file, in order.
+
+Add `"reset":true` to clear the frame table first, which makes the per-test loop
+a single call. It is opt-in rather than automatic because `changed` is
+cumulative and is the most valuable thing the table holds — you want labels
+during a ride without throwing that away, and you want an "off" marker that does
+not erase what the "on" marker was measuring. `POST /can/reset` still exists for
+a baseline with no label.
+
+Labels are truncated at 63 characters and the response echoes what was actually
+stored. `seq` is unique for the life of the boot and is not rewound by a reset,
+so it names one label unambiguously. `up_ms` is the monotonic clock the dump
+orders by, which is how you line an MQTT capture up against `/can/dump`.
+
+### From Node-RED
+
+An inject node per test, into a template node emitting
+
+```json
+{"text":"test high beam","reset":true}
+```
+
+then an mqtt-out node on `cmnd/mqttcan/mark`. Set the template's output to
+*parsed JSON* or the mqtt-out node to send a string — either way the payload on
+the wire has to be a JSON object, not bare text. An http-request node doing
+`POST http://mqttcan.local/can/mark` works identically and returns the ack, which
+is easier to debug against.
+
 ## Decoding workflow
 
 `changed` in `/can/ids` is a bitmask of which payload bytes have **ever** moved.
@@ -296,7 +362,8 @@ That one column separates live signal bytes from constant padding, and it is the
 fastest way in:
 
 ```sh
-curl -X POST http://mqttcan.local/can/reset   # clean baseline
+# clean baseline + a label, in one call
+curl -X POST -d '{"text":"left indicator","reset":true}' http://mqttcan.local/can/mark
 # perform exactly ONE action: left indicator, front brake, ignition off, ...
 curl http://mqttcan.local/can/ids | jq .
 ```

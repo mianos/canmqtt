@@ -17,9 +17,12 @@
 
 #include "CanBus.h"
 #include "FrameTable.h"
+#include "MqttClient.h"
 #include "SignalTable.h"
 #include "Settings.h"
 #include "WifiManager.h"
+
+#include "esp_timer.h"
 
 namespace {
 
@@ -54,6 +57,15 @@ esp_err_t send_json(httpd_req_t* req, const JsonWrapper& json) {
     return httpd_resp_sendstr(req, out.c_str());
 }
 
+// Labels arrive from a Node-RED button or a shell, so tolerate stray padding
+// but treat whitespace-only as no label at all.
+std::string trimmed(const std::string& s) {
+    const char* ws = " \t\r\n";
+    const size_t b = s.find_first_not_of(ws);
+    if (b == std::string::npos) return std::string();
+    return s.substr(b, s.find_last_not_of(ws) - b + 1);
+}
+
 // Pull a positive integer query parameter, e.g. /can/dump?limit=500.
 size_t query_limit(httpd_req_t* req, size_t fallback) {
     char query[64];
@@ -66,9 +78,37 @@ size_t query_limit(httpd_req_t* req, size_t fallback) {
 
 }  // namespace
 
+JsonWrapper applyMark(FrameTable& table, SignalTable* signals, MqttClient& mqtt,
+                      const std::string& sensorName, const std::string& text, bool reset) {
+    // Reset first: the label has to outlive the wipe it asked for.
+    if (reset) {
+        table.reset();
+        if (signals != nullptr) signals->resetState();
+    }
+
+    const uint64_t upUs = (uint64_t)esp_timer_get_time();
+    const uint32_t seq  = table.mark(text.c_str(), upUs);
+
+    JsonWrapper body;
+    body.AddItem("seq",   static_cast<int>(seq));
+    // Echo what was actually stored, not what was sent, so a truncated label
+    // reports itself.
+    body.AddItem("text",  text.substr(0, kMarkTextMax));
+    body.AddItem("reset", reset);
+    // The same monotonic clock the dump orders by: this is what lets a consumer
+    // line an MQTT capture up against /can/dump.
+    body.AddItem("up_ms", static_cast<int>(upUs / 1000ULL));
+
+    // esp_mqtt_client_publish can block for a few seconds on a stalled network.
+    // Acceptable here: this is a ~70-byte QoS 0 payload on a human-paced route.
+    mqtt.publish("tele/" + sensorName + "/mark", body.ToString());
+    return body;
+}
+
 CanWebServer::CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
-                           SignalTable& signals)
-    : WebServer(ctx), settings_(settings), bus_(bus), table_(table), signals_(signals) {}
+                           SignalTable& signals, MqttClient& mqtt)
+    : WebServer(ctx), settings_(settings), bus_(bus), table_(table), signals_(signals),
+      mqtt_(mqtt) {}
 
 esp_err_t CanWebServer::start() {
     esp_err_t r = WebServer::start();
@@ -79,7 +119,7 @@ esp_err_t CanWebServer::start() {
         httpd_method_t method;
         esp_err_t (*handler)(httpd_req_t*);
     };
-    const std::array<Route, 12> routes = {{
+    const std::array<Route, 13> routes = {{
         {"/firmware",    HTTP_POST, firmware_post_handler},
         {"/firmware",    HTTP_GET,  firmware_get_handler},
         {"/config",      HTTP_GET,  config_get_handler},
@@ -89,6 +129,7 @@ esp_err_t CanWebServer::start() {
         {"/can/dump",    HTTP_GET,  can_dump_get_handler},
         {"/can/status",  HTTP_GET,  can_status_get_handler},
         {"/can/reset",   HTTP_POST, can_reset_post_handler},
+        {"/can/mark",    HTTP_POST, can_mark_post_handler},
         {"/signals",        HTTP_GET,  signals_get_handler},
         {"/signals",        HTTP_POST, signals_post_handler},
         {"/signals/status", HTTP_GET,  signals_status_get_handler},
@@ -268,13 +309,33 @@ esp_err_t CanWebServer::can_dump_get_handler(httpd_req_t* req) {
     CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
     const size_t limit = query_limit(req, 0);  // 0 = everything retained
     std::vector<CanFrame> frames = self->table_.recentFrames(limit);
+    std::vector<Mark>     marks  = self->table_.recentMarks();
 
     httpd_resp_set_type(req, "text/plain");
     constexpr size_t kFramesPerChunk = 64;
+    // dumpText merges marks into one frame list, so each chunk must be handed
+    // only the marks that fall inside it — otherwise every chunk re-emits the
+    // whole backlog. `mi` walks the mark list once, in step with the frames.
+    size_t mi = 0;
     for (size_t i = 0; i < frames.size(); i += kFramesPerChunk) {
-        const size_t n = std::min(kFramesPerChunk, frames.size() - i);
-        std::string chunk = dumpText(std::vector<CanFrame>(frames.begin() + i,
-                                                           frames.begin() + i + n));
+        const size_t n    = std::min(kFramesPerChunk, frames.size() - i);
+        const bool   last = (i + n >= frames.size());
+        size_t mj = mi;
+        if (last) {
+            mj = marks.size();   // trailing marks belong to the final chunk
+        } else {
+            const uint64_t until = frames[i + n - 1].recvUs;
+            while (mj < marks.size() && marks[mj].recvUs <= until) ++mj;
+        }
+        std::string chunk = dumpText(
+            std::vector<CanFrame>(frames.begin() + i, frames.begin() + i + n),
+            std::vector<Mark>(marks.begin() + mi, marks.begin() + mj));
+        mi = mj;
+        if (httpd_resp_send_chunk(req, chunk.data(), chunk.size()) != ESP_OK) return ESP_FAIL;
+    }
+    // No frames retained, but labels may still be worth showing.
+    if (frames.empty() && !marks.empty()) {
+        std::string chunk = dumpText({}, marks);
         if (httpd_resp_send_chunk(req, chunk.data(), chunk.size()) != ESP_OK) return ESP_FAIL;
     }
     return httpd_resp_send_chunk(req, nullptr, 0);
@@ -313,8 +374,48 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
 esp_err_t CanWebServer::can_reset_post_handler(httpd_req_t* req) {
     CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
     self->table_.reset();
+    // Decode state too, matching the MQTT canreset command: without this the
+    // next value of every signal is suppressed as "unchanged" and the freshly
+    // cleared board reports nothing until something physically moves.
+    self->signals_.resetState();
     JsonWrapper resp;
     resp.AddItem("status", std::string("cleared"));
+    return send_json(req, resp);
+}
+
+// POST /can/mark — drop an operator label into the capture:
+//   curl -X POST -d '{"text":"test high beam"}' http://mqttcan.local/can/mark
+//   curl -X POST -d '{"text":"front brake","reset":true}' .../can/mark
+//
+// The label is published on tele/<name>/mark and appears inline in /can/dump,
+// so a capture read back later says which action produced which change.
+esp_err_t CanWebServer::can_mark_post_handler(httpd_req_t* req) {
+    CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
+    if (req->content_len > kMaxJsonBodyBytes) return sendJsonError(req, 413, "request body too large");
+    std::string body = read_request_body(req);
+    if (body.empty()) return sendJsonError(req, 400, "empty body");
+    JsonWrapper json = JsonWrapper::Parse(body);
+    if (json.Empty()) return sendJsonError(req, 400, "invalid JSON");
+
+    std::string text;
+    if (!json.GetField("text", text)) {
+        return sendJsonError(req, 400, json.ContainsField("text")
+                                           ? "field 'text' must be a string"
+                                           : "missing string field 'text'");
+    }
+    text = trimmed(text);
+    if (text.empty()) return sendJsonError(req, 400, "field 'text' is empty");
+
+    // Accept both true and 1 for 'reset': Node-RED template nodes emit either
+    // depending on how the payload was built.
+    bool reset = false;
+    if (!json.GetField("reset", reset)) {
+        int n = 0;
+        if (json.GetField("reset", n)) reset = (n != 0);
+    }
+
+    JsonWrapper resp = applyMark(self->table_, &self->signals_, self->mqtt_,
+                                 self->settings_.sensorName, text, reset);
     return send_json(req, resp);
 }
 

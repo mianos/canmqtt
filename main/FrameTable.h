@@ -32,6 +32,18 @@ struct IdRecord {
     uint64_t lastPubUs   = 0;
 };
 
+// An operator-supplied label dropped into the capture, e.g. "test high beam",
+// pushed just before performing the action it names. Decoding works by
+// correlation, and without these the record of *which* action produced a change
+// exists only in the operator's head.
+inline constexpr size_t kMarkTextMax = 63;
+
+struct Mark {
+    uint64_t recvUs = 0;   // monotonic, the same clock as CanFrame::recvUs
+    uint32_t seq    = 0;   // unique for the life of the boot; survives reset()
+    char     text[kMarkTextMax + 1] = {};
+};
+
 // Live per-ID view of the bus, plus a rolling window of raw frames.
 //
 // observe() runs on the CanBus worker task and decides whether a frame is worth
@@ -61,8 +73,16 @@ public:
     // Raw frames, oldest first, capped at `limit` (0 = all retained).
     std::vector<CanFrame> recentFrames(size_t limit = 0) const;
 
-    // Forget everything. Use it to get a clean baseline immediately before
-    // performing one physical action on the vehicle.
+    // Record an operator label at `recvUs` and return the sequence number it
+    // was given. Text longer than kMarkTextMax is truncated.
+    uint32_t mark(const char* text, uint64_t recvUs);
+
+    // Retained labels, oldest first — mirrors recentFrames().
+    std::vector<Mark> recentMarks() const;
+
+    // Forget everything, labels included: a label pointing at frames that have
+    // been discarded misleads more than it helps. Sequence numbers are *not*
+    // rewound, so a seq identifies one label for the whole boot.
     void reset();
 
     size_t   trackedIds() const;
@@ -81,6 +101,13 @@ private:
     std::vector<CanFrame> ring_;
     size_t                ringHead_  = 0;
     size_t                ringCount_ = 0;
+
+    // Far rarer than frames, so a small fixed ring is plenty.
+    static constexpr size_t kMarkRing = 32;
+    Mark     marks_[kMarkRing] = {};
+    size_t   markHead_  = 0;
+    size_t   markCount_ = 0;
+    uint32_t markSeq_   = 0;
 
     uint32_t totalFrames_ = 0;
     uint32_t overflowIds_ = 0;  // frames dropped because the ID table was full
@@ -101,5 +128,15 @@ std::string canIdHex(uint32_t id, bool ext);
 // the static_assert in its addItemInternal).
 std::string idsJson(const FrameTable& table, uint32_t bitrate);
 
-// dumpText: `(sec.usec) can0 2BC#00A1FF00` per line, candump's format.
-std::string dumpText(const std::vector<CanFrame>& frames);
+// dumpText: `(sec.usec) can0 2BC#00A1FF00` per line, candump's format, with any
+// operator labels merged in as `# MARK <seq> <text>` at their place in the
+// sequence. Both inputs must be ordered by recvUs, which recentFrames() and
+// recentMarks() both are.
+//
+// Labels carry no timestamp of their own on purpose: the frame timestamps above
+// come from the TWAI hardware counter, which wraps about every 72 minutes, and
+// printing a second unrelated clock into the same file invites misreading.
+// Position in the stream is the information. Use the `up_ms` field on the MQTT
+// `mark` topic to line a capture up against wall time.
+std::string dumpText(const std::vector<CanFrame>& frames,
+                     const std::vector<Mark>& marks = {});

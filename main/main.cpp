@@ -29,6 +29,7 @@
 // MQTT (cmnd/<name>/...):
 //   settings    any subset of the /config JSON (e.g. {"can_bitrate":125000})
 //   canreset    {}  clear the frame table + dump ring (baseline before an action)
+//   mark        {"text":"test high beam"[,"reset":true]}  label the capture
 //   restart     {}
 //   reprovision {}  clears Wi-Fi creds, reboots into ESP-Touch v2 provisioning
 // Publishes:
@@ -36,6 +37,7 @@
 //                       on each accepted payload change
 //   tele/<name>/signals {"id":"0x2BC","engine_temp_c":88.5,"gear":"N"} — named
 //                       values, whenever one moves past its own deadband
+//   tele/<name>/mark    {"seq":7,"text":"test high beam","reset":false,"up_ms":…}
 //   tele/<name>/stats   bus health + rates, 1/min — the bit-rate diagnostic
 //   tele/<name>/init,status   identity + telemetry
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
@@ -132,6 +134,37 @@ esp_err_t handleCanReset(MqttClient*, const std::string&, const JsonWrapper&, vo
     auto* app = static_cast<App*>(ctx);
     if (app->table) app->table->reset();
     if (app->signals) app->signals->resetState();  // or the next report is suppressed as "unchanged"
+    return ESP_OK;
+}
+
+// cmnd/<name>/mark — {"text":"test high beam"}, optionally "reset":true.
+//
+// The payload must be a JSON *object*: MqttClient::dispatchEvent parses every
+// message and drops anything that is not one before a handler ever runs, so a
+// bare-text publish silently goes nowhere.
+esp_err_t handleMark(MqttClient*, const std::string&, const JsonWrapper& d, void* ctx) {
+    auto* app = static_cast<App*>(ctx);
+    if (app->table == nullptr) return ESP_OK;
+
+    std::string text;
+    if (!d.GetField("text", text)) {
+        ESP_LOGW(TAG, "mark: payload needs a string field 'text'");
+        return ESP_OK;
+    }
+    const size_t b = text.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) {
+        ESP_LOGW(TAG, "mark: empty label ignored");
+        return ESP_OK;
+    }
+    text = text.substr(b, text.find_last_not_of(" \t\r\n") - b + 1);
+
+    bool reset = false;
+    if (!d.GetField("reset", reset)) {
+        int n = 0;
+        if (d.GetField("reset", n)) reset = (n != 0);
+    }
+    // applyMark publishes the ack itself, so the body it returns is discarded.
+    applyMark(*app->table, app->signals, *app->mqtt, app->settings->sensorName, text, reset);
     return ESP_OK;
 }
 
@@ -395,6 +428,7 @@ extern "C" void app_main(void) {
     const std::string b = "cmnd/" + settings.sensorName + "/";
     mqtt.registerHandler(b + "settings",    std::regex(b + "settings"),    handleSettings,    &app);
     mqtt.registerHandler(b + "canreset",    std::regex(b + "canreset"),    handleCanReset,    &app);
+    mqtt.registerHandler(b + "mark",        std::regex(b + "mark"),        handleMark,        &app);
     mqtt.registerHandler(b + "restart",     std::regex(b + "restart"),     handleRestart,     &app);
     mqtt.registerHandler(b + "reprovision", std::regex(b + "reprovision"), handleReprovision, &app);
     mqtt.start();
@@ -523,7 +557,7 @@ extern "C" void app_main(void) {
     // Web server: /healthz, /reset, /set_hostname plus /firmware, /config,
     // /config/reset, /can/ids, /can/dump, /can/status, /can/reset.
     static WebContext webctx(&wifi);
-    static CanWebServer web(&webctx, settings, bus, table, signals);
+    static CanWebServer web(&webctx, settings, bus, table, signals, mqtt);
     web.start();
 
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);

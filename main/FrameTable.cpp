@@ -81,10 +81,18 @@ std::string idsJson(const FrameTable& table, uint32_t bitrate) {
     return out;
 }
 
-std::string dumpText(const std::vector<CanFrame>& frames) {
+std::string dumpText(const std::vector<CanFrame>& frames,
+                     const std::vector<Mark>& marks) {
     std::string out;
-    out.reserve(frames.size() * 44);
+    out.reserve(frames.size() * 44 + marks.size() * 48);
+    size_t m = 0;
     for (const CanFrame& f : frames) {
+        // Ordering is on recvUs, the monotonic clock, not the printed hardware
+        // timestamp, which wraps.
+        while (m < marks.size() && marks[m].recvUs <= f.recvUs) {
+            out += "# MARK " + std::to_string(marks[m].seq) + " " + marks[m].text + "\n";
+            ++m;
+        }
         char line[96];
         snprintf(line, sizeof(line), "(%llu.%06llu) can0 %s#%s%s\n",
                  (unsigned long long)(f.timestampUs / 1000000ULL),
@@ -93,6 +101,11 @@ std::string dumpText(const std::vector<CanFrame>& frames) {
                  f.rtr ? "R" : "",
                  toHex(f.data, f.len).c_str());
         out += line;
+    }
+    // Labels newer than the last frame, and the whole list when there are no
+    // frames at all.
+    for (; m < marks.size(); ++m) {
+        out += "# MARK " + std::to_string(marks[m].seq) + " " + marks[m].text + "\n";
     }
     return out;
 }
@@ -212,6 +225,34 @@ std::vector<CanFrame> FrameTable::recentFrames(size_t limit) const {
     return out;
 }
 
+uint32_t FrameTable::mark(const char* text, uint64_t recvUs) {
+    LockGuard g(lock_);
+    Mark& m = marks_[markHead_];
+    m = Mark{};
+    m.recvUs = recvUs;
+    m.seq    = ++markSeq_;
+    if (text != nullptr) {
+        strncpy(m.text, text, kMarkTextMax);
+        m.text[kMarkTextMax] = '\0';
+    }
+    markHead_ = (markHead_ + 1) % kMarkRing;
+    if (markCount_ < kMarkRing) markCount_++;
+    ESP_LOGI(TAG, "mark %" PRIu32 ": %s", m.seq, m.text);
+    return m.seq;
+}
+
+std::vector<Mark> FrameTable::recentMarks() const {
+    LockGuard g(lock_);
+    std::vector<Mark> out;
+    out.reserve(markCount_);
+    size_t i = (markHead_ + kMarkRing - markCount_) % kMarkRing;
+    for (size_t k = 0; k < markCount_; ++k) {
+        out.push_back(marks_[i]);
+        i = (i + 1) % kMarkRing;
+    }
+    return out;
+}
+
 void FrameTable::reset() {
     LockGuard g(lock_);
     std::fill(slots_.begin(), slots_.end(), IdRecord{});
@@ -219,7 +260,11 @@ void FrameTable::reset() {
     ringCount_   = 0;
     totalFrames_ = 0;
     overflowIds_ = 0;
-    ESP_LOGW(TAG, "frame table and dump ring cleared");
+    // Labels go too: one that points at discarded frames is worse than none.
+    // markSeq_ deliberately keeps counting, so a seq names one label per boot.
+    markHead_  = 0;
+    markCount_ = 0;
+    ESP_LOGW(TAG, "frame table, dump ring and marks cleared");
 }
 
 size_t FrameTable::trackedIds() const {
