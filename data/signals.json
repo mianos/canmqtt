@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 5,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -7,6 +7,8 @@
     "_": "Payload bytes that free-run and must not count as a frame change. Bit N mutes byte N. Without these an ID republishes at its full cyclic rate for a whole ride and buries the real events.",
     "3FF": "1C",
     "_3FF": "D2-D4 is a seconds counter. Measured on the bike incrementing by exactly 1 every 1000ms. The sheet documents it for the S1000R and its contributor could not find a use for it either. D1 (ambient light) and D5-D7 (odometer) stay live.",
+    "2BC": "18",
+    "_2BC": "D3-D4 is a 16-bit accumulator that only runs with the engine. Measured at idle climbing about 100 counts every 300ms, strictly monotonic, and it froze the instant the ignition went off. Purpose unknown (engine revolutions, run time or fuel used are all plausible) and it is in no published decode table. It made 2BC the noisiest ID on the bus by a wide margin: 347 raw publishes from 3857 frames, 9%, versus 1% for everything else. D2 (engine temperature) is deliberately NOT masked, so real temperature changes still publish. The current value stays visible in /can/ids and on the 60s heartbeat.",
     "2AC": "03",
     "_2AC": "D0 steps through a fixed sequence and D1's low nibble counts 0-E, per the sheet's S1000R column; this frame is otherwise undecoded and arrives every 99ms. Provisional: unmute it if D0/D1 turn out to carry state on the K25."
   },
@@ -71,11 +73,13 @@
     "2BC": {
       "name": "engine_status",
       "signals": [
-        {"name": "engine_temp_c", "bytes": [2], "scale": 0.75, "offset": -24, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000},
+        {"name": "engine_temp_c", "bytes": [2], "scale": 0.75, "offset": -24, "unit": "C", "decimals": 1, "deadband": 1.0, "min_ms": 5000,
+         "_note": "deadband must exceed one quantisation step (scale), or a sensor resting between two codes reports forever. Observed on the bike dithering 0x40/0x41 = 24.0/24.8 C, which cleared the old 0.5 deadband every time. 1.0 swallows one step and still reports two."},
         {"name": "gear", "bytes": [5], "nibble": "high",
          "map": {"1": "1", "2": "N", "4": "2", "7": "3", "8": "4", "B": "5", "D": "6", "F": "between"},
          "_note": "The 2013 sheet said the LOW nibble; the current sheet says HIGH, attributed to eight models including the K25, and assigns the low nibble to an oil-level fault flag. High nibble used."},
-        {"name": "air_temp_c", "bytes": [7], "scale": 0.75, "offset": -48, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000}
+        {"name": "air_temp_c", "bytes": [7], "scale": 0.75, "offset": -48, "unit": "C", "decimals": 1, "deadband": 1.0, "min_ms": 5000,
+         "_note": "Same 0.75 quantum as engine_temp_c, so the same deadband rule applies."}
       ]
     },
     "2D0": {
