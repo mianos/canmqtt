@@ -658,6 +658,36 @@ Nothing about this is specific to the high beam — `signal` is just a name from
 the decode table, so the info button or the indicators can drive an output with
 no firmware change.
 
+### Where the GPIOs actually are: header P1
+
+The board looks like it has no usable I/O — screw terminals, USB-C and one
+SH1.0 UART plug (whose four wires are GND/VCC and the *console* UART, not spare
+pins). There is an **internal 2×10 header, P1**, and it breaks out twelve free
+GPIOs. It is inside the case, so reaching it means drilling or reprinting the
+enclosure. This is not in the wiki page or the product listing; it came out of
+[the schematic PDF](https://files.waveshare.com/wiki/ESP32-S3-RS485-CAN/ESP32-S3-RS485-CAN-Schematic.pdf).
+
+| Pin | Net | Pin | Net |
+|---|---|---|---|
+| 1 | 3V3 | 2 | 5V |
+| 3 | GND | 4 | GND |
+| 5 | TXD (console) | 6 | D_P (USB) |
+| 7 | RXD (console) | 8 | D_N (USB) |
+| 9 | **IO3** ⚠ strapping | 10 | **IO14** |
+| 11 | **IO4** | 12 | **IO13** |
+| 13 | **IO5** | 14 | **IO12** |
+| 15 | **IO6** | 16 | **IO11** |
+| 17 | **IO7** | 18 | **IO10** |
+| 19 | **IO8** | 20 | **IO9** |
+
+The schematic's own GPIO allocation table assigns nothing to IO3–IO14 on this
+board — only IO15/16 (CAN), IO17/18/21 (RS485) and IO43/44 (console) are spoken
+for. So any of IO4–IO14 is fair game. **IO3 is a strapping pin** and the loader
+rejects it.
+
+In use here: `IO4` on pin 11 → relay `IN1`, `IO5` on pin 13 → relay `IN2`,
+pin 3 or 4 → relay `DC−`.
+
 ### Wiring, and the pins you cannot use
 
 `gpios` is validated on load and a bad pin is a 400 on `POST /signals`, not a
@@ -675,7 +705,21 @@ brick. Rejected on this board:
 module). ESP32-S3 pins float during reset and the first moments of boot, so
 without it the lights flash on every reboot. The firmware parks each pin at its
 inactive level before enabling the pad and sets a matching internal pull, but
-that cannot cover the window before the firmware runs.
+that cannot cover the window before the firmware runs. Optocoupler isolation
+does not help — a floating input can still bias the LED into conduction.
+
+On a jumper-selectable relay module, set the trigger jumpers to **H**
+(high-level) and leave `active_low` false. Low-level trigger is unreliable from
+3.3 V logic: the module pulls the optocoupler anode to 5 V, so a logic high
+still leaves ~1.7 V across an LED whose forward drop is ~1.2–1.4 V, and the
+relay may never release.
+
+Coil power comes from the bike's fused accessory circuit, not from the board.
+There is no `VIN`/`5V` pin to borrow on the outside of this board — it is a
+7–36 V screw terminal — so use a 12 V-coil module, or a 5 V one with its own
+supply. P1 pin 2 does carry 5 V, but its current headroom is unspecified, so
+do not run coils from it. Ground is already common: the board's logic is
+referenced to `V−`, which is bike ground.
 
 Feed the relay coils from the bike's fused accessory circuit, not from the
 board. Boot state is always off and nothing is persisted, so a crash or reboot

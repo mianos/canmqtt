@@ -1,5 +1,5 @@
 {
-  "version": 13,
+  "version": 14,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -22,10 +22,11 @@
   "outputs": {
     "_": "GPIO relays driven from decoded signals. This is the only part of the file that makes the board act rather than watch; the CAN controller stays in hardware listen-only mode regardless. gpios[] is empty until the real pin numbers are set, and an empty list configures nothing at all. Forbidden on this board: 15/16 (CAN), 26-37 (SPI flash and the octal PSRAM this ESP32-S3R8 carries), 0/3/45/46 (strapping), 19/20 (USB), 43/44 (console UART). The loader rejects those with a 400 rather than taking out the flash interface.",
     "driving": {
-      "gpios": [],
+      "gpios": [4, 5],
       "active_low": false,
       "auto_off_ms": 0,
       "off_when": {"signal": "ignition", "is": "off"},
+      "_wiring": "IO4 = P1 pin 11 -> relay IN1, IO5 = P1 pin 13 -> relay IN2, P1 pin 3 or 4 = GND -> relay DC-. P1 is the internal 2x10 header, confirmed from the Waveshare schematic: 1 3V3, 2 5V, 3 GND, 4 GND, 5 TXD, 6 D_P, 7 RXD, 8 D_N, 9 IO3, 10 IO14, 11 IO4, 12 IO13, 13 IO5, 14 IO12, 15 IO6, 16 IO11, 17 IO7, 18 IO10, 19 IO8, 20 IO9. IO4-IO14 are unallocated on this board per the schematic's own GPIO table, so any of them would do; pin 9 is IO3, a strapping pin, and the loader rejects it. active_low false because the relay module's S1/S2 jumpers are in the H position. FIT A 10K PULL-DOWN FROM EACH IN TO DC-: the pin floats during reset and the first moments of boot, and a floating high-trigger input can close the relay, which means both driving lights flashing on every reboot. Firmware cannot cover that window.",
       "_note": "Two auxiliary driving lights on two relays, switched together. active_low true if the relay board closes on a low input. auto_off_ms 0 means no timeout; set it to e.g. 3600000 for a one-hour battery backstop. off_when drops the lights when the ZFE reports the ignition off, which also covers the case of the board being fed from constant rather than switched 12V."
     }
   },
