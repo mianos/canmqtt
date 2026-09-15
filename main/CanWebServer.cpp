@@ -119,7 +119,15 @@ esp_err_t CanWebServer::start() {
         httpd_method_t method;
         esp_err_t (*handler)(httpd_req_t*);
     };
-    const std::array<Route, 14> routes = {{
+    // The shared WebServer starts httpd with max_uri_handlers = 16 and spends
+    // three of them on /reset, /set_hostname and /healthz. Registration past
+    // that returns ESP_ERR_HTTPD_HANDLERS_FULL and the route simply is not
+    // there — a 404 at runtime with nothing else wrong, which is a miserable
+    // thing to debug. The static_assert below turns it into a build error.
+    constexpr size_t kMaxUriHandlers = 16;
+    constexpr size_t kBaseRoutes     = 3;
+
+    const std::array<Route, 13> routes = {{
         {"/firmware",    HTTP_POST, firmware_post_handler},
         {"/firmware",    HTTP_GET,  firmware_get_handler},
         {"/config",      HTTP_GET,  config_get_handler},
@@ -133,8 +141,10 @@ esp_err_t CanWebServer::start() {
         {"/can/inject",  HTTP_POST, can_inject_post_handler},
         {"/signals",        HTTP_GET,  signals_get_handler},
         {"/signals",        HTTP_POST, signals_post_handler},
-        {"/signals/status", HTTP_GET,  signals_status_get_handler},
     }};
+    static_assert(routes.size() + kBaseRoutes <= kMaxUriHandlers,
+                  "too many HTTP routes: raise max_uri_handlers in the shared "
+                  "WebServer, or httpd will silently drop the last ones");
 
     for (const Route& route : routes) {
         httpd_uri_t uri = {
@@ -361,6 +371,27 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
     // frames. Worth surfacing: it is otherwise indistinguishable from real data.
     resp.AddItem("injected",     static_cast<int>(c.injected));
 
+    // Decode-table state lives here rather than on its own route: httpd's
+    // handler table is nearly full (see start()), and "is the decoder loaded
+    // and what is it muting" is the same question as "what is the bus doing".
+    resp.AddItem("signals_loaded",    self->signals_.loaded());
+    resp.AddItem("signals_byte_base", self->signals_.byteBase());
+    resp.AddItem("signals_frames",    static_cast<int>(self->signals_.frameCount()));
+    resp.AddItem("signals_count",     static_cast<int>(self->signals_.signalCount()));
+    const auto noise = self->signals_.noiseMasks();
+    if (!noise.empty()) {
+        // Flattened to a string because JsonWrapper has no nested-object
+        // support: "0x2AC=03,0x3FF=1C".
+        std::string flat;
+        for (size_t i = 0; i < noise.size(); ++i) {
+            char nm[24];
+            snprintf(nm, sizeof(nm), "%s0x%s=%02X", i ? "," : "",
+                     canIdHex(noise[i].first, noise[i].first > 0x7FF).c_str(), noise[i].second);
+            flat += nm;
+        }
+        resp.AddItem("signals_noise", flat);
+    }
+
     twai_node_status_t st;
     twai_node_record_t rec;
     if (self->bus_.info(st, rec) == ESP_OK) {
@@ -556,40 +587,4 @@ esp_err_t CanWebServer::signals_post_handler(httpd_req_t* req) {
     resp.AddItem("signals", (int)self->signals_.signalCount());
     resp.AddItem("bytes",   (int)body.size());
     return send_json(req, resp);
-}
-
-// GET /signals/status — is a table loaded, what does it cover, and which byte
-// convention is it using. The ids list is the quick way to see whether the IDs
-// in the table match the ones /can/ids is actually seeing on the bike.
-esp_err_t CanWebServer::signals_status_get_handler(httpd_req_t* req) {
-    CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
-    std::vector<uint32_t> ids = self->signals_.knownIds();
-    std::sort(ids.begin(), ids.end());
-
-    std::string out = "{\"loaded\":";
-    out += self->signals_.loaded() ? "true" : "false";
-    out += ",\"byte_base\":" + std::to_string(self->signals_.byteBase());
-    out += ",\"frames\":" + std::to_string(self->signals_.frameCount());
-    out += ",\"signals\":" + std::to_string(self->signals_.signalCount());
-    out += ",\"ids\":[";
-    for (size_t i = 0; i < ids.size(); ++i) {
-        if (i) out += ',';
-        out += "\"0x" + canIdHex(ids[i], ids[i] > 0x7FF) + "\"";
-    }
-    out += "]";
-    const auto noise = self->signals_.noiseMasks();
-    if (!noise.empty()) {
-        out += ",\"noise\":{";
-        for (size_t i = 0; i < noise.size(); ++i) {
-            if (i) out += ',';
-            char nm[32];
-            snprintf(nm, sizeof(nm), "\"0x%s\":\"%02X\"",
-                     canIdHex(noise[i].first, noise[i].first > 0x7FF).c_str(), noise[i].second);
-            out += nm;
-        }
-        out += '}';
-    }
-    out += "}";
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, out.c_str());
 }

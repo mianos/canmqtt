@@ -235,8 +235,7 @@ broker ACL or the board genuinely not publishing.
 | `GET /can/dump?limit=N` | recent raw frames as `candump` text |
 | `GET /signals` | the decode table in use |
 | `POST /signals` | replace it (validated before storing) |
-| `GET /signals/status` | loaded?, byte_base, frame/signal counts, known IDs |
-| `GET /can/status` | bit rate, error state, counters — see the listen-only caveat below |
+| `GET /can/status` | bit rate, error state, counters, **and decode-table state** — see the listen-only caveat below |
 | `POST /can/reset` | clear table + ring (and decode state) |
 | `POST /can/mark` | label the capture; `{"text":"…"[,"reset":true]}` |
 | `POST /can/inject` | push a synthetic frame through the software path; safe while listen-only |
@@ -253,7 +252,7 @@ the bike — no firmware rebuild. The firmware embeds a copy and writes it out o
 first boot, so a freshly flashed board decodes immediately.
 
 ```sh
-curl http://<host>/signals/status    # loaded? how many frames/signals? which IDs?
+curl http://<host>/can/status        # loaded? how many frames/signals? what is muted?
 curl http://<host>/signals           # the table currently in use
 curl --data-binary @data/signals.json http://<host>/signals   # replace it
 ```
@@ -310,8 +309,8 @@ and D4 while leaving ambient light on D1 and the odometer on D5–D7 live:
 Muted bytes are still stored and still counted in the `changed` mask — hiding a
 counter from the publish decision should not hide the fact that it is moving.
 `/can/ids` shows the mask as a `noise` field on the affected row, and
-`/signals/status` lists every muted ID, which is the way to confirm the section
-parsed without waiting for bus traffic.
+`/can/status` reports `signals_noise` (e.g. `0x2AC=03,0x3FF=1C`), which is the
+way to confirm the section parsed without waiting for bus traffic.
 
 Verified on the board with [`/can/inject`](#frame-injection), listen-only, on
 the bike:

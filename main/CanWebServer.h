@@ -40,7 +40,6 @@ JsonWrapper applyMark(FrameTable& table, SignalTable* signals, MqttClient& mqtt,
 //                       (no bus access, so it is safe while listen-only)
 //   GET  /signals       the decode table currently in use (JSON)
 //   POST /signals       replace it (validated before it is stored)
-//   GET  /signals/status  whether a table is loaded, and what it covers
 // Handlers recover this instance from req->user_ctx.
 class CanWebServer : public WebServer {
 public:
@@ -66,7 +65,6 @@ private:
     static esp_err_t can_inject_post_handler(httpd_req_t* req);
     static esp_err_t signals_get_handler(httpd_req_t* req);
     static esp_err_t signals_post_handler(httpd_req_t* req);
-    static esp_err_t signals_status_get_handler(httpd_req_t* req);
 
     Settings&    settings_;
     CanBus&      bus_;

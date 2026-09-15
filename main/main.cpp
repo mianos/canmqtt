@@ -41,7 +41,7 @@
 //   tele/<name>/stats   bus health + rates, 1/min — the bit-rate diagnostic
 //   tele/<name>/init,status   identity + telemetry
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
-//       /signals /signals/status
+//       /can/mark /can/inject /signals
 
 #include <cinttypes>
 #include <cstring>

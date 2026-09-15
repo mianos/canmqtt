@@ -66,7 +66,7 @@ public:
     // table's "noise" section. 0 when the ID has no entry.
     uint8_t  noiseMask(uint32_t id) const;
 
-    // Every muted ID and its mask, for /signals/status — the only way to
+    // Every muted ID and its mask, for /can/status — the only way to
     // confirm the "noise" section parsed without waiting for bus traffic.
     std::vector<std::pair<uint32_t, uint8_t>> noiseMasks() const;
 
@@ -74,7 +74,7 @@ public:
     size_t   frameCount() const;
     size_t   signalCount() const;
     int      byteBase() const { return byteBase_; }
-    // Names of the IDs in the table, for /signals/status.
+    // Names of the IDs in the table.
     std::vector<uint32_t> knownIds() const;
 
 private:
