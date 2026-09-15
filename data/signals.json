@@ -1,5 +1,5 @@
 {
-  "version": 9,
+  "version": 10,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -29,8 +29,8 @@
          "map": {"A": "clutch_in", "6": "clutch_out", "5": "kill_switch_on"},
          "_note": "UNRESOLVED. Sheet says high nibble of D4, the Arduino sniffer reads the low nibble, same 6/A values. On the bike D4 read 0x16 (high 1, low 6) with the ignition on and engine off: the LOW nibble is the one holding 6 = clutch_out, which favours the sniffer. Pull the clutch, mark it, and see which nibble moves."},
         {"name": "side_stand", "bytes": [5], "nibble": "low",
-         "map": {"5": "up", "9": "down"},
-         "_note": "CONFIRMED on the vehicle 2026-09-15 by working the stand: D5 went E9 <-> E5, high nibble static at E, LOW nibble moving 9 (down, the parked resting state) <-> 5 (up). The sheet's VALUES are right and its NIBBLE is wrong, the same error it makes on clutch and ABS. D5's high nibble is something else and did not move."},
+         "map": {"9": "up", "5": "down"},
+         "_note": "CONFIRMED on the vehicle 2026-09-15, bike on the CENTRE stand so the side stand began up. D5 read E9 with it up, E5 while it was pulled down, E9 again once returned. So the low nibble carries it, 9 up and 5 down. The sheet is wrong twice over here: it names the HIGH nibble, which sat at E throughout and never moved, and it inverts the values as 5=Up 9=Down. Values were initially recorded inverted here too, from assuming a parked bike rests on its side stand; it did not."},
         {"name": "throttle_pct", "bytes": [6], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300,
          "_note": "The current sheet says D6(High Nibble) with a /255 formula. The 2013 sheet listed this as whole byte 7 (D6) with the same formula and the K50 row uses a whole byte too; the nibble label is a later transcription slip. Whole byte used. Should track throttle_valve_pct."}
       ]

@@ -380,6 +380,7 @@ changed byte read back. The bike agrees with the table:
 | Left indicator | `130` | D7 | `CF` | `D7` |
 | Front brake | `294` | D6 | `03` | `07` |
 | Heated grips | `2D0` | D7 high nibble | `C` | `D` low, `E` high |
+| Side stand | `10C` | D5 **low** nibble | `9` up | `5` down |
 
 Engine running added rpm on `10C` D2–D3, reading 1304 at a fast cold idle.
 
@@ -427,6 +428,10 @@ diff the byte.
   the state is certainly in there.
 - **`3FF` ambient light**: sheet `B` dark / `7` light, sniffer `7` dark /
   `3` light. The bike read `9` in daylight, so neither is right.
+
+Three of the sheet's nibble claims have now been tested against the bike and all
+three were wrong, so treat the rest as unverified rather than merely uncertain.
+The side stand was wrong twice over: wrong nibble *and* inverted values.
 - **`2D0` D7** carries heated grips in the high nibble (`C`/`D`/`E`, sniffer
   confirmed) and the sheet's separate ignition row (`FF` off / `DF` on) is the
   same byte seen with the grips on low. Ignition is therefore `FF` ⇒ off,
