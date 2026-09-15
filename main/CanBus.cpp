@@ -306,6 +306,33 @@ esp_err_t CanBus::transmit(uint32_t id, bool ext, const uint8_t* data, size_t le
     return err;
 }
 
+esp_err_t CanBus::inject(uint32_t id, bool ext, const uint8_t* data, size_t len) {
+    if (queue_ == nullptr) return ESP_ERR_INVALID_STATE;
+    if (len > kCanMaxData) return ESP_ERR_INVALID_ARG;
+
+    // Same shape the ISR builds, so nothing downstream can tell the difference.
+    // Both clocks come from esp_timer here: there is no hardware capture for a
+    // frame that was never on the wire, and using the monotonic value for both
+    // keeps /can/dump ordering sane.
+    CanFrame f = {};
+    const uint64_t now = (uint64_t)esp_timer_get_time();
+    f.timestampUs = now;
+    f.recvUs      = now;
+    f.id          = id;
+    f.len         = (uint8_t)len;
+    f.ext         = ext;
+    f.rtr         = false;
+    std::memcpy(f.data, data, len);
+
+    if (xQueueSend(queue_, &f, 0) != pdTRUE) {
+        counters_.drops++;
+        return ESP_ERR_NO_MEM;
+    }
+    counters_.framesRx++;
+    counters_.injected++;
+    return ESP_OK;
+}
+
 esp_err_t CanBus::info(twai_node_status_t& status, twai_node_record_t& record) const {
     if (node_ == nullptr) return ESP_ERR_INVALID_STATE;
     return twai_node_get_info(node_, &status, &record);

@@ -46,6 +46,7 @@ struct CanBusCounters {
     uint32_t drops;      // frames lost because the queue was full
     uint32_t rxErrors;   // on_error callbacks
     uint32_t stateChanges;
+    uint32_t injected;   // synthetic frames pushed in by inject(), never real
 };
 
 // Passive monitor for the on-chip TWAI controller.
@@ -84,6 +85,16 @@ public:
     // Fails with ESP_ERR_NOT_SUPPORTED when listen-only, which is the desired
     // outcome everywhere except the bench self-test.
     esp_err_t transmit(uint32_t id, bool ext, const uint8_t* data, size_t len);
+
+    // Push a synthetic frame into the RX queue exactly as the ISR would, so the
+    // worker task, frame table, decoder and publishers all treat it as real.
+    //
+    // This is the safe counterpart to the self-test injector: it touches no
+    // hardware at all, so unlike transmit() it works while listen-only and can
+    // be used on a vehicle to exercise everything above the controller. It does
+    // pollute the frame table with fabricated data, which is why it is counted
+    // separately and reported in /can/status.
+    esp_err_t inject(uint32_t id, bool ext, const uint8_t* data, size_t len);
 
     // Live controller state: error state, tx/rx error counts, cumulative bus
     // errors. Reading frames alongside a flat bus_err_num means the bit rate is

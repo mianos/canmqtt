@@ -36,6 +36,8 @@ JsonWrapper applyMark(FrameTable& table, SignalTable* signals, MqttClient& mqtt,
 //   GET  /can/status    bit rate, error state, counters
 //   POST /can/reset     clear the frame table and dump ring
 //   POST /can/mark      drop an operator label into the capture
+//   POST /can/inject    push a synthetic frame through the software path
+//                       (no bus access, so it is safe while listen-only)
 //   GET  /signals       the decode table currently in use (JSON)
 //   POST /signals       replace it (validated before it is stored)
 //   GET  /signals/status  whether a table is loaded, and what it covers
@@ -61,6 +63,7 @@ private:
     static esp_err_t can_status_get_handler(httpd_req_t* req);
     static esp_err_t can_reset_post_handler(httpd_req_t* req);
     static esp_err_t can_mark_post_handler(httpd_req_t* req);
+    static esp_err_t can_inject_post_handler(httpd_req_t* req);
     static esp_err_t signals_get_handler(httpd_req_t* req);
     static esp_err_t signals_post_handler(httpd_req_t* req);
     static esp_err_t signals_status_get_handler(httpd_req_t* req);

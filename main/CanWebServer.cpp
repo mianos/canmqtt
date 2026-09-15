@@ -119,7 +119,7 @@ esp_err_t CanWebServer::start() {
         httpd_method_t method;
         esp_err_t (*handler)(httpd_req_t*);
     };
-    const std::array<Route, 13> routes = {{
+    const std::array<Route, 14> routes = {{
         {"/firmware",    HTTP_POST, firmware_post_handler},
         {"/firmware",    HTTP_GET,  firmware_get_handler},
         {"/config",      HTTP_GET,  config_get_handler},
@@ -130,6 +130,7 @@ esp_err_t CanWebServer::start() {
         {"/can/status",  HTTP_GET,  can_status_get_handler},
         {"/can/reset",   HTTP_POST, can_reset_post_handler},
         {"/can/mark",    HTTP_POST, can_mark_post_handler},
+        {"/can/inject",  HTTP_POST, can_inject_post_handler},
         {"/signals",        HTTP_GET,  signals_get_handler},
         {"/signals",        HTTP_POST, signals_post_handler},
         {"/signals/status", HTTP_GET,  signals_status_get_handler},
@@ -356,6 +357,9 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
     resp.AddItem("rx_errors",    static_cast<int>(c.rxErrors));
     resp.AddItem("state_changes", static_cast<int>(c.stateChanges));
     resp.AddItem("tracked_ids",  static_cast<int>(self->table_.trackedIds()));
+    // Non-zero means someone used /can/inject and the table holds fabricated
+    // frames. Worth surfacing: it is otherwise indistinguishable from real data.
+    resp.AddItem("injected",     static_cast<int>(c.injected));
 
     twai_node_status_t st;
     twai_node_record_t rec;
@@ -427,6 +431,77 @@ esp_err_t CanWebServer::can_mark_post_handler(httpd_req_t* req) {
 
     JsonWrapper resp = applyMark(self->table_, &self->signals_, self->mqtt_,
                                  self->settings_.sensorName, text, reset);
+    return send_json(req, resp);
+}
+
+// POST /can/inject — push a synthetic frame through the whole software path
+// without touching the bus, so the table, decoder, noise masks and publishers
+// can be exercised on a vehicle while the controller stays listen-only.
+//
+//   {"id":"0x3FF","data":"497FC9BC1E78D001"}
+//   {"id":"0x3FF","data":"497FC9BC1E78D001","repeat":5,"increment":2}
+//
+// `increment` bumps that payload byte by one on each repeat, which is how you
+// reproduce a free-running counter and prove a noise mask suppresses it.
+esp_err_t CanWebServer::can_inject_post_handler(httpd_req_t* req) {
+    CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
+    if (req->content_len > kMaxJsonBodyBytes) return sendJsonError(req, 413, "request body too large");
+    std::string body = read_request_body(req);
+    if (body.empty()) return sendJsonError(req, 400, "empty body");
+    JsonWrapper json = JsonWrapper::Parse(body);
+    if (json.Empty()) return sendJsonError(req, 400, "invalid JSON");
+
+    std::string idStr, dataStr;
+    if (!json.GetField("id", idStr))     return sendJsonError(req, 400, "missing string field 'id'");
+    if (!json.GetField("data", dataStr)) return sendJsonError(req, 400, "missing string field 'data'");
+
+    const uint32_t id = (uint32_t)strtoul(
+        idStr.compare(0, 2, "0x") == 0 ? idStr.c_str() + 2 : idStr.c_str(), nullptr, 16);
+
+    uint8_t data[kCanMaxData] = {};
+    if (dataStr.size() % 2 != 0 || dataStr.size() > kCanMaxData * 2) {
+        return sendJsonError(req, 400, "'data' must be an even number of hex digits, 16 max");
+    }
+    const size_t len = dataStr.size() / 2;
+    for (size_t i = 0; i < len; ++i) {
+        char byteStr[3] = {dataStr[i * 2], dataStr[i * 2 + 1], '\0'};
+        char* end = nullptr;
+        const unsigned long v = strtoul(byteStr, &end, 16);
+        if (end != byteStr + 2) return sendJsonError(req, 400, "'data' is not hex");
+        data[i] = (uint8_t)v;
+    }
+
+    bool ext = (id > 0x7FF);
+    json.GetField("ext", ext);
+
+    int repeat = 1;
+    json.GetField("repeat", repeat);
+    if (repeat < 1 || repeat > 256) return sendJsonError(req, 400, "'repeat' must be 1..256");
+
+    int increment = -1;
+    json.GetField("increment", increment);
+    if (increment >= (int)len) return sendJsonError(req, 400, "'increment' is past the end of 'data'");
+
+    int sent = 0;
+    for (int n = 0; n < repeat; ++n) {
+        if (self->bus_.inject(id, ext, data, len) != ESP_OK) break;
+        sent++;
+        if (increment >= 0) data[increment]++;
+        // The worker task has to actually drain these, and a publish decision
+        // depends on the gap between frames, so do not fire them all in one
+        // tick.
+        if (repeat > 1) vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    ESP_LOGW(TAG, "injected %d synthetic frame(s) for 0x%s - table now contains fabricated data",
+             sent, canIdHex(id, ext).c_str());
+
+    JsonWrapper resp;
+    resp.AddItem("id",       "0x" + canIdHex(id, ext));
+    resp.AddItem("injected", sent);
+    resp.AddItem("dlc",      static_cast<int>(len));
+    resp.AddItem("note",     std::string("synthetic frames, not bus traffic; "
+                                         "POST /can/reset afterwards"));
     return send_json(req, resp);
 }
 

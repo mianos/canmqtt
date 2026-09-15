@@ -239,6 +239,7 @@ broker ACL or the board genuinely not publishing.
 | `GET /can/status` | bit rate, error state, counters — see the listen-only caveat below |
 | `POST /can/reset` | clear table + ring (and decode state) |
 | `POST /can/mark` | label the capture; `{"text":"…"[,"reset":true]}` |
+| `POST /can/inject` | push a synthetic frame through the software path; safe while listen-only |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
 | `GET`/`POST /firmware` | OTA (raw `.bin` body) |
 | `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base. **`/reset` wipes the Wi-Fi credentials** and reboots into provisioning; it is not a restart. To reboot after a setting that needs one, use `cmnd/<name>/restart` over MQTT or power-cycle |
@@ -311,6 +312,16 @@ counter from the publish decision should not hide the fact that it is moving.
 `/can/ids` shows the mask as a `noise` field on the affected row, and
 `/signals/status` lists every muted ID, which is the way to confirm the section
 parsed without waiting for bus traffic.
+
+Verified on the board with [`/can/inject`](#frame-injection), listen-only, on
+the bike:
+
+| Injected | Frames in | Published |
+|---|---|---|
+| `3FF` ticking D2 (masked) | 8 | 1 |
+| `3FF` ticking D5 (odometer) | 8 | 8 |
+| `2AC` ticking D0 (masked) | 6 | 1 |
+| `2AC` ticking D4 | 6 | 6 |
 
 To find a candidate, look for an ID in `/can/ids` whose `published` count is
 close to its `count`, then watch the byte in `/can/dump`.
@@ -483,10 +494,46 @@ curl --data-binary @build/mqttcan.bin http://mqttcan.local/firmware
 A freshly-OTA'd image boots `PENDING_VERIFY` and is only marked valid once Wi-Fi
 is back, so an image that boots but can't reach the network rolls itself back.
 
+## Frame injection
+
+`POST /can/inject` pushes a synthetic frame into the RX queue exactly where the
+ISR would, so the worker task, frame table, noise masks, decoder and publishers
+all handle it as real. It touches **no hardware**, so unlike the bench self-test
+below it works while listen-only and is safe to use on the vehicle:
+
+```sh
+curl -X POST -d '{"id":"0x2BC","data":"FF5341000026F861"}' http://mqttcan.local/can/inject
+```
+
+`repeat` sends several copies and `increment` bumps one payload byte each time,
+which reproduces a free-running counter. That is how the noise masks were
+verified on the bike without ever leaving listen-only:
+
+```sh
+# D2 is inside 3FF's "1C" mask -> 8 frames in, 1 published
+curl -X POST -d '{"id":"0x3FF","data":"497FC9BC1E78D001","repeat":8,"increment":2}' \
+  http://mqttcan.local/can/inject
+
+# D5 is the odometer, not masked -> 8 frames in, 8 published
+curl -X POST -d '{"id":"0x3FF","data":"497FC9BC1E78D001","repeat":8,"increment":5}' \
+  http://mqttcan.local/can/inject
+```
+
+Set `publish_min_ms` to 0 first, or the 200 ms floor will suppress the control
+case too and both look identical.
+
+Injected frames are **indistinguishable from real ones downstream**, which is
+the point and also the hazard: they go into the frame table and out to MQTT like
+anything else. `/can/status` reports an `injected` count so the provenance is
+visible, and it stays set for the rest of the boot even after `POST /can/reset`,
+because "this board has had fabricated data in it" is the fact worth keeping.
+Clear the table afterwards, and remember a power cycle resets the counter.
+
 ## Bench self-test
 
-There is a built-in injector for exercising the whole pipeline with **no bus, no
-transceiver activity and no second CAN node**:
+The older injector transmits real frames on the transceiver, for exercising the
+controller itself with **no bus and no second CAN node**. Prefer `/can/inject`
+above unless you specifically need the hardware path:
 
 ```jsonc
 {"self_test": 1, "can_listen_only": 0, "log_frames": 1}
