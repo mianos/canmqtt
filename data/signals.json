@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -85,7 +85,8 @@
     "2D0": {
       "name": "body",
       "signals": [
-        {"name": "ambient_air_temp_c", "bytes": [1], "scale": 0.5, "offset": -40, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000},
+        {"name": "ambient_air_temp_c", "bytes": [1], "scale": 0.5, "offset": -40, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000, "invalid": 255,
+         "_note": "0xFF means no reading, seen for about a minute after the ignition is switched on before the ZFE has a value. Without the sentinel that publishes an ambient temperature of 87.5C, which is impossible on a motorcycle and was observed doing exactly that. Real readings sit around 0x7E-0x81."},
         {"name": "lamp_fault", "bytes": [2], "nibble": "low",
          "map": {"0": "none", "1": "low_beam", "4": "high_beam", "8": "signals"}},
         {"name": "fuel_to_reserve_pct", "bytes": [3], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 10000},
