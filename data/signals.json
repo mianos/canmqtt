@@ -1,5 +1,5 @@
 {
-  "version": 12,
+  "version": 13,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -34,14 +34,14 @@
       "name": "driving_lights",
       "signal": "high_beam",
       "trigger": "on",
-      "window_ms": 1000,
-      "max_hold_ms": 600,
+      "window_ms": 2500,
+      "max_hold_ms": 900,
       "min_gap_ms": 60,
       "actions": {
         "1": {"output": "driving", "set": "off"},
         "3": {"output": "driving", "set": "on"}
       },
-      "_note": "Three clicks of the high beam inside a second turns the driving lights on, one click turns them off. A click is a COMPLETE SHORT PULSE: the signal must reach trigger and leave it again within max_hold_ms, and it is counted on release. Holding the high beam on is therefore never a click, and a hold longer than max_hold_ms cancels a sequence in progress. window_ms runs from the LAST release, so a slow triple still counts as three. The consequence of 1=off is that a deliberate flash-to-pass switches the driving lights off; that was chosen knowingly. Change the '1' key to '2' if it becomes a nuisance. Any enum signal can drive this - info_button, turn_signals - by name, with no firmware change."
+      "_note": "Three clicks of the high beam turns the driving lights on, one click turns them off. A click is a COMPLETE SHORT PULSE: the signal must reach trigger and leave it again within max_hold_ms, and it is counted on release. Holding the high beam on is therefore never a click, and a hold longer than max_hold_ms cancels a sequence in progress. TIMING, measured on the bike 2026-09-15: the 130 frame only carries high beam state every 200ms, so a click costs two frames minimum and clicks cannot be closer than about 400ms. A fast flick whose press AND release fall between two frames never reaches the bus at all, which is how a deliberate three-click burst came back as two clicks and then one. Click deliberately, around half a second apart, rather than quickly. window_ms was widened from 1000 to 2500 to absorb a dropped or late pulse; it costs nothing on the triple because a burst now fires the instant it reaches the highest mapped count (3) without waiting for the window. Only the 1-click case waits, and waiting 2.5s to switch the lights off is fine. max_hold_ms 900 so a slightly lingering press still counts rather than cancelling. The consequence of 1=off is that a deliberate flash-to-pass switches the driving lights off; that was chosen knowingly. Change the '1' key to '2' if it becomes a nuisance. Any enum signal can drive this - info_button, turn_signals - by name, with no firmware change."
     }
   ],
   "_extraction": "bytes[] is little-endian, least-significant first: (D3*256+D2) is bytes:[2,3]. nibble is 'high' or 'low'. value = raw*scale + offset. map keys are uppercase hex of the extracted value; 'default' labels any code not in the map, otherwise it reports as unmapped_0xNN. deadband/min_ms suppress chatter on analog signals.",

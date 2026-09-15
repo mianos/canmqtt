@@ -385,6 +385,7 @@ bool GestureEngine::loadJson(const std::string& json, std::string& errorOut) {
                 return false;
             }
             gd.actions.emplace_back((int)clicks, act);
+            if ((int)clicks > gd.maxClicks) gd.maxClicks = (int)clicks;
         }
         built.push_back(std::move(gd));
     }
@@ -443,7 +444,8 @@ void GestureEngine::onSignal(const std::string& signal, const std::string& text,
                 ESP_LOGI(TAG, "gesture '%s': held %" PRIu32 "ms, sequence cancelled",
                          gd.name.c_str(), (uint32_t)(held / 1000ULL));
             }
-            gd.clicks = 0;
+            gd.clicks  = 0;
+            gd.fireNow = false;
             continue;
         }
         if (gd.clicks != 0 &&
@@ -452,6 +454,15 @@ void GestureEngine::onSignal(const std::string& signal, const std::string& text,
         }
         gd.clicks++;
         gd.lastReleaseUs = recvUs;
+
+        // Fire as soon as the count reaches the highest one the table maps:
+        // no further click can change the outcome, so there is nothing left to
+        // wait for. This is what lets window_ms be generous. Without it the
+        // window has to be short to keep the action responsive, and a short
+        // window splits a burst whenever the rider is slow or the bus drops a
+        // pulse between frames — measured on the bike, where a three-click
+        // burst came back as two clicks and then one.
+        if (gd.maxClicks > 0 && gd.clicks >= gd.maxClicks) gd.fireNow = true;
     }
 }
 
@@ -461,7 +472,9 @@ void GestureEngine::tick(uint64_t nowUs) {
         LockGuard g(lock_);
         for (Gesture& gd : gestures_) {
             if (gd.clicks == 0 || gd.pressed) continue;
-            if ((nowUs - gd.lastReleaseUs) < (uint64_t)gd.windowMs * 1000ULL) continue;
+            if (!gd.fireNow &&
+                (nowUs - gd.lastReleaseUs) < (uint64_t)gd.windowMs * 1000ULL) continue;
+            gd.fireNow = false;
 
             Fired f;
             f.name      = gd.name;

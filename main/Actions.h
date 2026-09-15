@@ -130,6 +130,13 @@ private:
 // The window runs from the *last* release rather than the first, so a slow
 // triple click still resolves as three instead of being truncated at two.
 //
+// A burst also resolves *immediately* once the count reaches the highest one
+// the table maps, since no further click could change the outcome. That is what
+// lets window_ms be generous: the top gesture stays instant while a lower count
+// waits out the window to be sure nothing more is coming. Without it the window
+// has to be short to keep the action responsive, and a short window splits a
+// burst whenever the rider is slow or the bus loses a pulse between frames.
+//
 // Signal names are the decode table's own, so any enum signal can drive this
 // without a firmware change.
 class GestureEngine {
@@ -170,6 +177,7 @@ private:
         uint32_t    maxHoldMs = 600;
         uint32_t    minGapMs  = 60;
         std::vector<std::pair<int, Action>> actions;   // click count -> action
+        int         maxClicks = 0;   // highest mapped count; reaching it fires early
 
         // Runtime. lastText is the engine's own view of the signal, deliberately
         // not SignalTable's: resetState() (from canreset/mark) makes the next
@@ -181,6 +189,7 @@ private:
         uint64_t    pressedUs     = 0;
         int         clicks        = 0;
         uint64_t    lastReleaseUs = 0;
+        bool        fireNow       = false;   // count hit maxClicks; resolve on the next tick
     };
 
     struct Fired {
