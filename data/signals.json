@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 9,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -21,18 +21,16 @@
   "frames": {
     "10C": {
       "name": "engine",
+      "_note": "asc_abs was removed here. The sheet put side stand on D5's high nibble and ASC/ABS on its low nibble; the bike proves the side stand is the LOW nibble, so the ASC signal was reading the stand and reporting off/on as the stand moved. ASC/ABS state has no confirmed home on this bus. D5's high nibble sat at E throughout and is a candidate.",
       "signals": [
         {"name": "throttle_valve_pct", "bytes": [1], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300},
         {"name": "rpm", "bytes": [2, 3], "scale": 0.25, "unit": "rpm", "decimals": 0, "deadband": 25, "min_ms": 500},
         {"name": "clutch_kill", "bytes": [4], "nibble": "high",
          "map": {"A": "clutch_in", "6": "clutch_out", "5": "kill_switch_on"},
          "_note": "UNRESOLVED. Sheet says high nibble of D4, the Arduino sniffer reads the low nibble, same 6/A values. On the bike D4 read 0x16 (high 1, low 6) with the ignition on and engine off: the LOW nibble is the one holding 6 = clutch_out, which favours the sniffer. Pull the clutch, mark it, and see which nibble moves."},
-        {"name": "side_stand", "bytes": [5], "nibble": "high",
+        {"name": "side_stand", "bytes": [5], "nibble": "low",
          "map": {"5": "up", "9": "down"},
-         "_note": "UNRESOLVED. Read 0xE9 on the bike, so the high nibble was E, matching neither 5 nor 9. D5 is the only byte of 10C that moved during the whole capture, so the state does live here. Mark 'sidestand down', flip it, mark 'sidestand up', and diff."},
-        {"name": "asc_abs", "bytes": [5], "nibble": "low",
-         "map": {"5": "off", "6": "on"},
-         "_note": "UNRESOLVED. Sheet and sniffer agree on the low nibble of D5, but the bike read 9 there, matching neither 5 nor 6. Same D5 investigation as side_stand."},
+         "_note": "CONFIRMED on the vehicle 2026-09-15 by working the stand: D5 went E9 <-> E5, high nibble static at E, LOW nibble moving 9 (down, the parked resting state) <-> 5 (up). The sheet's VALUES are right and its NIBBLE is wrong, the same error it makes on clutch and ABS. D5's high nibble is something else and did not move."},
         {"name": "throttle_pct", "bytes": [6], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300,
          "_note": "The current sheet says D6(High Nibble) with a /255 formula. The 2013 sheet listed this as whole byte 7 (D6) with the same formula and the K50 row uses a whole byte too; the nibble label is a later transcription slip. Whole byte used. Should track throttle_valve_pct."}
       ]
@@ -114,6 +112,7 @@
     },
     "32F": {
       "name": "tyre_pressure",
+      "_note": "RDC IS fitted on this bike, contrary to the first reading. The senders sleep when parked and report 0xFF; moving the bike woke the front one, which then read D6=0x76 = 2.36 bar (34 psi), sane for a GS against a ~2.5 bar spec. The invalid sentinel did exactly its job: silence while asleep, real value once awake. D4 and D5 woke and slept in step with D6 and D7, so the frame is very likely front/rear pairs, D4+D6 front and D5+D7 rear, with D4/D5 as tyre temperature. D4 read 0x3E = 62, which is 22C under the -40 offset TPMS senders normally use and matches ambient. NOT added as signals: the offset is a guess and a wrong one would publish fiction, which is the mistake this file has already made twice.",
       "signals": [
         {"name": "rdc_front_bar", "bytes": [6], "scale": 0.02, "unit": "bar", "decimals": 2, "deadband": 0.05, "min_ms": 10000, "invalid": 255},
         {"name": "rdc_rear_bar", "bytes": [7], "scale": 0.02, "unit": "bar", "decimals": 2, "deadband": 0.05, "min_ms": 10000, "invalid": 255,
