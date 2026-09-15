@@ -257,6 +257,17 @@ curl http://<host>/signals           # the table currently in use
 curl --data-binary @data/signals.json http://<host>/signals   # replace it
 ```
 
+Frames can be decoded off the bike, using the same table the board runs, which
+is the quickest way to read a log someone pasted at you:
+
+```sh
+tools/decode.py < capture.log
+mosquitto_sub -h $B -t "tele/$N/frame" | tools/decode.py
+```
+
+It accepts either the JSON the board publishes or bare `2BC#FF534E...` candump
+text.
+
 An upload is **parsed and applied before it is written to flash**: a table that
 does not load is rejected with the parse error and nothing is stored, so a bad
 edit cannot leave the device unable to decode after a reboot.
