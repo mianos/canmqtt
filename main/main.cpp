@@ -30,6 +30,7 @@
 //   settings    any subset of the /config JSON (e.g. {"can_bitrate":125000})
 //   canreset    {}  clear the frame table + dump ring (baseline before an action)
 //   mark        {"text":"test high beam"[,"reset":true]}  label the capture
+//   output      {"name":"driving","set":"on"|"off"|"toggle"}  drive a GPIO relay
 //   restart     {}
 //   reprovision {}  clears Wi-Fi creds, reboots into ESP-Touch v2 provisioning
 // Publishes:
@@ -38,10 +39,12 @@
 //   tele/<name>/signals {"id":"0x2BC","engine_temp_c":88.5,"gear":"N"} — named
 //                       values, whenever one moves past its own deadband
 //   tele/<name>/mark    {"seq":7,"text":"test high beam","reset":false,"up_ms":…}
+//   tele/<name>/gesture {"gesture":"driving_lights","clicks":3,"action":"driving=on"}
+//   tele/<name>/output  {"name":"driving","state":"on","by":"gesture:3"}
 //   tele/<name>/stats   bus health + rates, 1/min — the bit-rate diagnostic
 //   tele/<name>/init,status   identity + telemetry
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
-//       /can/mark /can/inject /signals
+//       /can/mark /can/inject /can/output /signals
 
 #include <cinttypes>
 #include <cstring>
@@ -70,6 +73,7 @@
 #include "WebServer.h"
 #include "WifiManager.h"
 
+#include "Actions.h"
 #include "CanBus.h"
 #include "CanWebServer.h"
 #include "FrameTable.h"
@@ -93,6 +97,8 @@ struct App {
     CanBus*      bus   = nullptr;  // set once constructed, later in app_main
     FrameTable*  table = nullptr;
     SignalTable* signals = nullptr;
+    OutputBank*  outputs = nullptr;
+    GestureEngine* gestures = nullptr;
 };
 
 std::string uptimeString() {
@@ -165,6 +171,26 @@ esp_err_t handleMark(MqttClient*, const std::string&, const JsonWrapper& d, void
     }
     // applyMark publishes the ack itself, so the body it returns is discarded.
     applyMark(*app->table, app->signals, *app->mqtt, app->settings->sensorName, text, reset);
+    return ESP_OK;
+}
+
+// cmnd/<name>/output — {"name":"driving","set":"on"|"off"|"toggle"}.
+// Manual control for Node-RED, and the way to exercise a relay from the bench
+// without pulling a lever. Same body as POST /can/output; the state change is
+// announced on tele/<name>/output by the change hook, not from here.
+esp_err_t handleOutput(MqttClient*, const std::string&, const JsonWrapper& d, void* ctx) {
+    auto* app = static_cast<App*>(ctx);
+    if (app->outputs == nullptr) return ESP_OK;
+
+    std::string name, set;
+    if (!d.GetField("name", name) || !d.GetField("set", set)) {
+        ESP_LOGW(TAG, "output: payload needs string fields 'name' and 'set'");
+        return ESP_OK;
+    }
+    std::string err;
+    if (!applyOutput(*app->outputs, name, set, "mqtt", err)) {
+        ESP_LOGW(TAG, "output: %s", err.c_str());
+    }
     return ESP_OK;
 }
 
@@ -313,6 +339,20 @@ void telemetryTask(void* arg) {
     }
 }
 
+// Everything that actually drives a relay runs here rather than on the CAN
+// worker task. The worker only records; a publish or a gpio_config() call in
+// that path would stall the RX queue and cost frames. 25ms is well under the
+// shortest gesture window and invisible to a rider.
+void actionsTask(void* arg) {
+    auto* app = static_cast<App*>(arg);
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(25));
+        const uint64_t now = (uint64_t)esp_timer_get_time();
+        app->gestures->tick(now);   // may switch an output
+        app->outputs->tick(now);    // off_when and auto_off expiry
+    }
+}
+
 // Bench only: transmit a few synthetic IDs with slowly-changing payloads so the
 // whole ISR -> queue -> table -> change-detect -> MQTT path can be exercised
 // with no bus attached. Requires can_listen_only=0 (a listen-only node
@@ -429,6 +469,7 @@ extern "C" void app_main(void) {
     mqtt.registerHandler(b + "settings",    std::regex(b + "settings"),    handleSettings,    &app);
     mqtt.registerHandler(b + "canreset",    std::regex(b + "canreset"),    handleCanReset,    &app);
     mqtt.registerHandler(b + "mark",        std::regex(b + "mark"),        handleMark,        &app);
+    mqtt.registerHandler(b + "output",      std::regex(b + "output"),      handleOutput,      &app);
     mqtt.registerHandler(b + "restart",     std::regex(b + "restart"),     handleRestart,     &app);
     mqtt.registerHandler(b + "reprovision", std::regex(b + "reprovision"), handleReprovision, &app);
     mqtt.start();
@@ -446,12 +487,22 @@ extern "C" void app_main(void) {
     // straight away. A bad table is never fatal -- raw frames keep flowing.
     static SignalTable signals;
     app.signals = &signals;
+
+    // Outputs and gestures come out of the same document. They are what makes
+    // this board act rather than only watch -- see Actions.h. The CAN
+    // controller is untouched by any of it and stays listen-only.
+    static OutputBank   outputs;
+    static GestureEngine gestures(outputs);
+    app.outputs  = &outputs;
+    app.gestures = &gestures;
+
+    std::string stored;
     if (signalstore::mount()) {
         std::string err;
         if (!signalstore::ensureDefault(err)) {
             ESP_LOGE(TAG, "could not seed signals.json: %s", err.c_str());
         }
-        const std::string stored = signalstore::read();
+        stored = signalstore::read();
         if (stored.empty()) {
             ESP_LOGE(TAG, "no decode table; publishing raw frames only");
         } else if (!signals.loadJson(stored, err)) {
@@ -461,9 +512,45 @@ extern "C" void app_main(void) {
     } else {
         ESP_LOGE(TAG, "signals partition unavailable; publishing raw frames only");
     }
+    if (!stored.empty()) {
+        // Outputs first: gesture actions are validated against the loaded
+        // output names. A bad section here is logged and leaves no outputs
+        // configured rather than being fatal -- the same policy as the decode
+        // table, and failing closed means no relay is driven.
+        std::string err;
+        if (!outputs.loadJson(stored, err)) {
+            ESP_LOGE(TAG, "outputs section rejected: %s", err.c_str());
+        } else if (!gestures.loadJson(stored, err)) {
+            ESP_LOGE(TAG, "gestures section rejected: %s", err.c_str());
+        }
+    }
+    outputs.setEnabled(settings.outputsEnable != 0);
 
     const std::string frameTopic  = "tele/" + settings.sensorName + "/frame";
     const std::string signalTopic = "tele/" + settings.sensorName + "/signals";
+    static const std::string outputTopic  = "tele/" + settings.sensorName + "/output";
+    static const std::string gestureTopic = "tele/" + settings.sensorName + "/gesture";
+
+    // Every output change is announced, whatever caused it, so a Node-RED panel
+    // can show the true state rather than assume its own button worked.
+    outputs.onChange([](const std::string& name, bool on, const char* by) {
+        JsonWrapper d;
+        d.AddItem("name",  name);
+        d.AddItem("state", std::string(on ? "on" : "off"));
+        d.AddItem("by",    std::string(by));
+        mqtt.publish(outputTopic, d.ToString());
+        ESP_LOGI(TAG, "output %s -> %s (%s)", name.c_str(), on ? "on" : "off", by);
+    });
+
+    // Reported for every resolved burst including unmapped counts: when a
+    // triple click does nothing, this is what tells you the board saw two.
+    gestures.onReport([](const std::string& name, int clicks, const std::string& action) {
+        JsonWrapper d;
+        d.AddItem("gesture", name);
+        d.AddItem("clicks",  clicks);
+        d.AddItem("action",  action);   // "" when the count is unmapped
+        mqtt.publish(gestureTopic, d.ToString());
+    });
 
     // Runs on the CanBus worker task, once per received frame. Publishing is
     // gated by FrameTable::observe() so a 500kbit/s firehose becomes a trickle
@@ -473,7 +560,12 @@ extern "C" void app_main(void) {
         // raw-frame filter. The two policies are independent: a signal has its
         // own deadband and min_ms, and gating it behind publish_min_ms would
         // drop real state changes just because the raw frame was throttled.
-        if (settings.publishEnable && signals.loaded()) {
+        //
+        // Decoding is also deliberately NOT gated on publishEnable: the
+        // gestures that switch the driving lights are fed from here, and
+        // turning MQTT publishing off must not turn the handlebar controls off
+        // with it. Only the publish below is conditional.
+        if (signals.loaded()) {
             std::vector<DecodedSignal> changed = signals.decode(f);
             if (!changed.empty()) {
                 JsonWrapper sd;
@@ -487,8 +579,16 @@ extern "C" void app_main(void) {
                                            : std::to_string(ds.value).c_str(),
                                  ds.unit->empty() ? "" : ds.unit->c_str());
                     }
+                    // Both of these only record, under a briefly-held mutex.
+                    // Nothing on this task is allowed to block: it drains the
+                    // RX queue, and a stall here costs frames. The actual
+                    // switching happens on the actions task.
+                    if (ds.isEnum) {
+                        outputs.onSignal(*ds.name, ds.text);
+                        gestures.onSignal(*ds.name, ds.text, f.recvUs);
+                    }
                 }
-                mqtt.publish(signalTopic, sd.ToString());
+                if (settings.publishEnable) mqtt.publish(signalTopic, sd.ToString());
             }
         }
 
@@ -556,15 +656,24 @@ extern "C" void app_main(void) {
         ESP_LOGW(TAG, "can_listen_only is now %d - saved, but takes effect on next boot",
                  settings.canListenOnly);
     });
+    // The relay kill switch, live. Clearing it forces every output off at once
+    // rather than waiting for the next gesture, which is the behaviour you want
+    // when something is misbehaving and you are at the side of the road.
+    settings.onChange("outputs_enable", [] {
+        outputs.setEnabled(settings.outputsEnable != 0);
+    });
 
     // Web server: /healthz, /reset, /set_hostname plus /firmware, /config,
     // /config/reset, /can/ids, /can/dump, /can/status, /can/reset.
     static WebContext webctx(&wifi);
-    static CanWebServer web(&webctx, settings, bus, table, signals, mqtt);
+    static CanWebServer web(&webctx, settings, bus, table, signals, mqtt, outputs, gestures);
     web.start();
 
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);
     xTaskCreate(telemetryTask, "telemetry", 4096, &app, 4, nullptr);
+    // 4096 to match the other publishing tasks: tick() can end up in
+    // esp_mqtt_client_publish, which is not a small-stack call.
+    xTaskCreate(actionsTask,   "actions",   4096, &app, 4, nullptr);
     if (canErr == ESP_OK) {
         xTaskCreate(statsTask, "can_stats", 4096, &app, 4, nullptr);
         if (selfTest) xTaskCreate(selfTestTask, "can_selftest", 4096, &app, 3, nullptr);

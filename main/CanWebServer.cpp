@@ -105,10 +105,30 @@ JsonWrapper applyMark(FrameTable& table, SignalTable* signals, MqttClient& mqtt,
     return body;
 }
 
+bool applyOutput(OutputBank& outputs, const std::string& name, const std::string& set,
+                 const char* by, std::string& errorOut) {
+    OutputBank::Level level;
+    if (!parseOutputLevel(set, level)) {
+        errorOut = "'set' must be on, off or toggle";
+        return false;
+    }
+    if (!outputs.enabled()) {
+        errorOut = "outputs are disabled (outputs_enable=0)";
+        return false;
+    }
+    if (!outputs.set(name, level, by)) {
+        errorOut = "unknown output '" + name + "'";
+        return false;
+    }
+    errorOut.clear();
+    return true;
+}
+
 CanWebServer::CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
-                           SignalTable& signals, MqttClient& mqtt)
+                           SignalTable& signals, MqttClient& mqtt, OutputBank& outputs,
+                           GestureEngine& gestures)
     : WebServer(ctx), settings_(settings), bus_(bus), table_(table), signals_(signals),
-      mqtt_(mqtt) {}
+      mqtt_(mqtt), outputs_(outputs), gestures_(gestures) {}
 
 esp_err_t CanWebServer::start() {
     esp_err_t r = WebServer::start();
@@ -124,6 +144,11 @@ esp_err_t CanWebServer::start() {
     // that returns ESP_ERR_HTTPD_HANDLERS_FULL and the route simply is not
     // there — a 404 at runtime with nothing else wrong, which is a miserable
     // thing to debug. The static_assert below turns it into a build error.
+    //
+    // This table is now exactly full. The next route needs one of: collapse
+    // another URI's methods onto a single HTTP_ANY handler the way /signals
+    // does below, or raise max_uri_handlers in the shared mianesp webserver
+    // component (which four other projects also build against).
     constexpr size_t kMaxUriHandlers = 16;
     constexpr size_t kBaseRoutes     = 3;
 
@@ -139,8 +164,10 @@ esp_err_t CanWebServer::start() {
         {"/can/reset",   HTTP_POST, can_reset_post_handler},
         {"/can/mark",    HTTP_POST, can_mark_post_handler},
         {"/can/inject",  HTTP_POST, can_inject_post_handler},
-        {"/signals",        HTTP_GET,  signals_get_handler},
-        {"/signals",        HTTP_POST, signals_post_handler},
+        {"/can/output",  HTTP_POST, can_output_post_handler},
+        // GET and POST share one handler slot via HTTP_ANY (see above); the
+        // dispatcher below splits them again. Externally nothing changes.
+        {"/signals",     static_cast<httpd_method_t>(HTTP_ANY), signals_any_handler},
     }};
     static_assert(routes.size() + kBaseRoutes <= kMaxUriHandlers,
                   "too many HTTP routes: raise max_uri_handlers in the shared "
@@ -392,6 +419,17 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
         resp.AddItem("signals_noise", flat);
     }
 
+    // Outputs and gestures. output_<name> is flattened one key per output for
+    // the same reason signals_noise is a string: JsonWrapper has no nested
+    // objects. "gestures" of 0 with a table that defines one means the section
+    // was rejected at load — check the console.
+    resp.AddItem("outputs_enable", self->outputs_.enabled());
+    resp.AddItem("outputs",        static_cast<int>(self->outputs_.count()));
+    resp.AddItem("gestures",       static_cast<int>(self->gestures_.count()));
+    for (const auto& s : self->outputs_.states()) {
+        resp.AddItem("output_" + s.first, std::string(s.second ? "on" : "off"));
+    }
+
     twai_node_status_t st;
     twai_node_record_t rec;
     if (self->bus_.info(st, rec) == ESP_OK) {
@@ -536,6 +574,46 @@ esp_err_t CanWebServer::can_inject_post_handler(httpd_req_t* req) {
     return send_json(req, resp);
 }
 
+// POST /can/output — drive a relay by name, bypassing the gestures:
+//   curl -X POST -d '{"name":"driving","set":"on"}' http://mqttcan.local/can/output
+//
+// This is how a relay is proved out on the bench before a lever is ever pulled,
+// and how Node-RED drives the lights directly. The reply carries the state of
+// every output, not just the one addressed.
+esp_err_t CanWebServer::can_output_post_handler(httpd_req_t* req) {
+    CanWebServer* self = static_cast<CanWebServer*>(req->user_ctx);
+    if (req->content_len > kMaxJsonBodyBytes) return sendJsonError(req, 413, "request body too large");
+    std::string body = read_request_body(req);
+    if (body.empty()) return sendJsonError(req, 400, "empty body");
+    JsonWrapper json = JsonWrapper::Parse(body);
+    if (json.Empty()) return sendJsonError(req, 400, "invalid JSON");
+
+    std::string name, set;
+    if (!json.GetField("name", name)) return sendJsonError(req, 400, "missing string field 'name'");
+    if (!json.GetField("set", set))   return sendJsonError(req, 400, "missing string field 'set'");
+
+    std::string err;
+    if (!applyOutput(self->outputs_, name, set, "http", err)) {
+        return sendJsonError(req, 400, err);
+    }
+
+    JsonWrapper resp;
+    resp.AddItem("status", std::string("ok"));
+    for (const auto& s : self->outputs_.states()) {
+        resp.AddItem("output_" + s.first, std::string(s.second ? "on" : "off"));
+    }
+    return send_json(req, resp);
+}
+
+// /signals is registered once with HTTP_ANY because httpd's handler table is
+// exactly full, so GET and POST cannot each have a slot. This splits them back
+// out; anything else gets a 405 rather than being silently treated as a read.
+esp_err_t CanWebServer::signals_any_handler(httpd_req_t* req) {
+    if (req->method == HTTP_GET)  return signals_get_handler(req);
+    if (req->method == HTTP_POST) return signals_post_handler(req);
+    return sendJsonError(req, 405, "use GET to read the decode table or POST to replace it");
+}
+
 // GET /signals — the decode table as stored. Served straight off the
 // filesystem rather than re-serialised from the parsed form, so what you read
 // back is byte-for-byte what is in use, comments and all.
@@ -574,6 +652,15 @@ esp_err_t CanWebServer::signals_post_handler(httpd_req_t* req) {
         ESP_LOGW(TAG, "rejected signals upload: %s", err.c_str());
         return sendJsonError(req, 400, err);
     }
+    // Outputs before gestures: gesture actions are validated against the output
+    // names. Unlike at boot these are hard failures, so a typo in a pin number
+    // or an output name is a 400 here rather than a relay that quietly never
+    // fires. The decode table is already live at this point, which is the right
+    // trade — the table is the thing you cannot afford to lose.
+    if (!self->outputs_.loadJson(body, err) || !self->gestures_.loadJson(body, err)) {
+        ESP_LOGW(TAG, "rejected signals upload: %s", err.c_str());
+        return sendJsonError(req, 400, err);
+    }
     if (!signalstore::write(body, err)) {
         // The new table is live but unsaved; say so rather than report success.
         return sendJsonError(req, 500, "table applied but not saved: " + err);
@@ -583,8 +670,10 @@ esp_err_t CanWebServer::signals_post_handler(httpd_req_t* req) {
              (unsigned)self->signals_.frameCount(), (unsigned)self->signals_.signalCount());
     JsonWrapper resp;
     resp.AddItem("status",  std::string("ok"));
-    resp.AddItem("frames",  (int)self->signals_.frameCount());
-    resp.AddItem("signals", (int)self->signals_.signalCount());
-    resp.AddItem("bytes",   (int)body.size());
+    resp.AddItem("frames",   (int)self->signals_.frameCount());
+    resp.AddItem("signals",  (int)self->signals_.signalCount());
+    resp.AddItem("outputs",  (int)self->outputs_.count());
+    resp.AddItem("gestures", (int)self->gestures_.count());
+    resp.AddItem("bytes",    (int)body.size());
     return send_json(req, resp);
 }

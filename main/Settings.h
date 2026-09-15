@@ -68,6 +68,14 @@ struct Settings : SettingsBase {
     // and HTTP handlers, never the ISR.
     int dumpRingFrames = 32768;
 
+    // --- Outputs ---
+    // Master kill switch for the GPIO outputs driven by signals.json's
+    // "gestures" section. Clearing it forces every output off immediately and
+    // makes further gestures inert, without editing the decode table — which is
+    // what you want when a relay starts misbehaving at the side of the road.
+    // Applies live.
+    int outputsEnable = 1;
+
     // --- Bench self-test ---
     // 1 ⇒ transmit synthetic frames to ourselves to exercise the whole
     // ISR→ring→table→MQTT path with no bus attached. Requires canListenOnly=0
@@ -89,6 +97,7 @@ struct Settings : SettingsBase {
         field("log_frames",           logFrames);
         field("max_tracked_ids",  maxTrackedIds);
         field("dump_ring_frames", dumpRingFrames);
+        field("outputs_enable",   outputsEnable);
         field("self_test",        selfTest);
         load();
     }

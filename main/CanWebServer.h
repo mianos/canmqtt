@@ -3,6 +3,9 @@
 #include "esp_err.h"
 #include "esp_http_server.h"
 
+#include <string>
+
+#include "Actions.h"
 #include "JsonWrapper.h"
 #include "WebServer.h"
 
@@ -24,6 +27,14 @@ JsonWrapper applyMark(FrameTable& table, SignalTable* signals, MqttClient& mqtt,
                       const std::string& sensorName,
                       const std::string& text, bool reset);
 
+// Drive a named GPIO output. `set` is "on", "off" or "toggle"; `by` records
+// what asked ("http", "mqtt"). Shared by POST /can/output and the MQTT `output`
+// command. Returns false with errorOut set for a bad level, an unknown output
+// name, or outputs disabled. The resulting state change is announced on
+// tele/<name>/output by OutputBank's change hook, not from here.
+bool applyOutput(OutputBank& outputs, const std::string& name, const std::string& set,
+                 const char* by, std::string& errorOut);
+
 // mqttcan HTTP control surface, layered on the shared WebServer base
 // (/reset, /set_hostname, /healthz). Adds:
 //   POST /firmware      raw .bin body -> inactive OTA slot -> reboot
@@ -38,13 +49,15 @@ JsonWrapper applyMark(FrameTable& table, SignalTable* signals, MqttClient& mqtt,
 //   POST /can/mark      drop an operator label into the capture
 //   POST /can/inject    push a synthetic frame through the software path
 //                       (no bus access, so it is safe while listen-only)
+//   POST /can/output    drive a GPIO relay by name
 //   GET  /signals       the decode table currently in use (JSON)
 //   POST /signals       replace it (validated before it is stored)
 // Handlers recover this instance from req->user_ctx.
 class CanWebServer : public WebServer {
 public:
     CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
-                 SignalTable& signals, MqttClient& mqtt);
+                 SignalTable& signals, MqttClient& mqtt, OutputBank& outputs,
+                 GestureEngine& gestures);
 
     esp_err_t start() override;
 
@@ -63,12 +76,16 @@ private:
     static esp_err_t can_reset_post_handler(httpd_req_t* req);
     static esp_err_t can_mark_post_handler(httpd_req_t* req);
     static esp_err_t can_inject_post_handler(httpd_req_t* req);
+    static esp_err_t can_output_post_handler(httpd_req_t* req);
+    static esp_err_t signals_any_handler(httpd_req_t* req);   // dispatches the two below
     static esp_err_t signals_get_handler(httpd_req_t* req);
     static esp_err_t signals_post_handler(httpd_req_t* req);
 
-    Settings&    settings_;
-    CanBus&      bus_;
-    FrameTable&  table_;
-    SignalTable& signals_;
-    MqttClient&  mqtt_;
+    Settings&      settings_;
+    CanBus&        bus_;
+    FrameTable&    table_;
+    SignalTable&   signals_;
+    MqttClient&    mqtt_;
+    OutputBank&    outputs_;
+    GestureEngine& gestures_;
 };

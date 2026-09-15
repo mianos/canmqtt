@@ -2,6 +2,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 idf_component_register(SRCS "main.cpp" "CanBus.cpp" "FrameTable.cpp" "CanWebServer.cpp" "SignalTable.cpp"
+                            "Actions.cpp"
                        INCLUDE_DIRS "."
                        REQUIRES
                          nvsstoragemanager
@@ -12,6 +13,7 @@ idf_component_register(SRCS "main.cpp" "CanBus.cpp" "FrameTable.cpp" "CanWebServ
                          jsonwrapper
                          espressif__mqtt
                          esp_driver_twai
+                         esp_driver_gpio
                          spiffs
                          esp_netif
                          esp_event

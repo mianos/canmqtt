@@ -127,6 +127,7 @@ Commands — `cmnd/mqttcan/…`:
 | `settings` | any subset of the `/config` JSON | apply + persist |
 | `canreset` | `{}` | clear the frame table + dump ring |
 | `mark` | `{"text":"test high beam"}`, optionally `"reset":true` | label the capture — see [Test annotations](#test-annotations) |
+| `output` | `{"name":"driving","set":"on"\|"off"\|"toggle"}` | drive a GPIO relay — see [Driving lights](#driving-lights) |
 | `restart` | `{}` | reboot |
 | `reprovision` | `{}` | clear Wi-Fi creds, reboot into ESP-Touch v2 |
 
@@ -141,6 +142,8 @@ Publishes — `tele/mqttcan/…`:
 | `frame` | `{"id":"0x2BC","ext":false,"dlc":8,"data":"DEADBEEF00000000","chg":"0C","t_us":…}` on each accepted change |
 | `signals` | decoded named values, e.g. `{"id":"0x2BC","engine_temp_c":88.5,"gear":"N"}` |
 | `mark` | `{"seq":7,"text":"test high beam","reset":false,"up_ms":1234567}` |
+| `gesture` | `{"gesture":"driving_lights","clicks":3,"action":"driving=on"}` on every resolved click burst, **including unmapped counts** (`"action":""`) |
+| `output` | `{"name":"driving","state":"on","by":"gesture:3"}` on every output change, whatever caused it |
 | `stats` | bus health, 1/min — the bit-rate diagnostic |
 | `init`, `status` | identity + uptime/heap |
 | `settingsack` | full settings after a `settings` command |
@@ -239,9 +242,19 @@ broker ACL or the board genuinely not publishing.
 | `POST /can/reset` | clear table + ring (and decode state) |
 | `POST /can/mark` | label the capture; `{"text":"…"[,"reset":true]}` |
 | `POST /can/inject` | push a synthetic frame through the software path; safe while listen-only |
+| `POST /can/output` | drive a GPIO relay directly; `{"name":"driving","set":"on"}` |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
 | `GET`/`POST /firmware` | OTA (raw `.bin` body) |
 | `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base. **`/reset` wipes the Wi-Fi credentials** and reboots into provisioning; it is not a restart. To reboot after a setting that needs one, use `cmnd/<name>/restart` over MQTT or power-cycle |
+
+The shared `WebServer` starts httpd with `max_uri_handlers = 16` and spends
+three, so **this table is exactly full**. Adding a route means collapsing
+another URI's methods onto a single `HTTP_ANY` handler — which is what `/signals`
+already does, invisibly from outside — or raising the limit in the mianesp
+`webserver` component that four other projects also build against. A
+`static_assert` in `CanWebServer::start()` turns overflow into a build error,
+because httpd otherwise just drops the last route and you get a 404 with nothing
+else wrong.
 
 ## Decoding: named signals
 
@@ -568,6 +581,145 @@ anything else. `/can/status` reports an `injected` count so the provenance is
 visible, and it stays set for the rest of the boot even after `POST /can/reset`,
 because "this board has had fabricated data in it" is the fact worth keeping.
 Clear the table afterwards, and remember a power cycle resets the counter.
+
+## Driving lights
+
+The one feature that makes this board *act* rather than only watch: click the
+high beam three times inside a second and a pair of auxiliary driving lights
+comes on, one click turns them off. No extra switch on the bars, no tap into the
+loom beyond the relay feed.
+
+The CAN side is unaffected. The TWAI controller stays in hardware listen-only
+mode; the only thing that leaves the board is a logic level on a GPIO.
+
+### What a click is
+
+A click is a **complete short pulse**, not a transition:
+
+```
+high_beam -> "on"                        pulse starts
+high_beam -> "off" within max_hold_ms    click counted, on release
+...quiet for window_ms...                burst resolves, action fires
+```
+
+Counting on release with a hold limit is what keeps ordinary use out of the way:
+holding the high beam on for a mile is one transition but never a click. A hold
+longer than `max_hold_ms` also **cancels** a burst in progress, so "hold it on"
+is a reliable way to abort a miscount.
+
+`window_ms` runs from the **last** release, not the first, so a slow triple
+still resolves as three rather than being truncated at two. The cost is that a
+single click takes `window_ms` to act — the board cannot know a second one is
+not coming.
+
+**A single flash-to-pass switches the driving lights off.** That is deliberate
+and was chosen knowingly; it is the price of `1 = off`. Change the `"1"` key to
+`"2"` in the table if it becomes a nuisance on the road.
+
+One inherent limit: `130` is cyclic, so a flash shorter than one frame period
+never reaches the decoder at all. Nothing in firmware can recover that.
+
+### Configuration
+
+Both sections live in `data/signals.json`, so the pin assignment and the gesture
+map are correctable over the air exactly like a byte mapping — `POST /signals`,
+no reflash.
+
+```jsonc
+"outputs": {
+  "driving": {
+    "gpios": [],                   // the relay pins; empty configures nothing
+    "active_low": false,           // true if the relay board closes on a low
+    "auto_off_ms": 0,              // battery backstop; 0 = never
+    "off_when": {"signal": "ignition", "is": "off"}
+  }
+},
+"gestures": [
+  {
+    "name": "driving_lights",
+    "signal": "high_beam",         // any enum signal in the decode table
+    "trigger": "on",               // the value that counts as "pressed"
+    "window_ms": 1000,
+    "max_hold_ms": 600,
+    "min_gap_ms": 60,              // contact-bounce floor
+    "actions": {
+      "1": {"output": "driving", "set": "off"},
+      "3": {"output": "driving", "set": "on"}
+    }
+  }
+]
+```
+
+`set` is `on`, `off` or `toggle`. A click count with no entry is published on
+`tele/…/gesture` and otherwise ignored, which is how you find out the board saw
+two when you meant three.
+
+Nothing about this is specific to the high beam — `signal` is just a name from
+the decode table, so the info button or the indicators can drive an output with
+no firmware change.
+
+### Wiring, and the pins you cannot use
+
+`gpios` is validated on load and a bad pin is a 400 on `POST /signals`, not a
+brick. Rejected on this board:
+
+| Pins | Why |
+|---|---|
+| 15, 16 | the CAN transceiver |
+| 26–37 | SPI flash **and the octal PSRAM** — this is an ESP32-S3R8 built with `CONFIG_SPIRAM_MODE_OCT`, so the range is wider than the usual quad-SPI one |
+| 0, 3, 45, 46 | strapping pins |
+| 19, 20 | USB D−/D+ |
+| 43, 44 | console UART |
+
+**Fit a pull-down at the relay input** (10 kΩ to ground for an active-high
+module). ESP32-S3 pins float during reset and the first moments of boot, so
+without it the lights flash on every reboot. The firmware parks each pin at its
+inactive level before enabling the pad and sets a matching internal pull, but
+that cannot cover the window before the firmware runs.
+
+Feed the relay coils from the bike's fused accessory circuit, not from the
+board. Boot state is always off and nothing is persisted, so a crash or reboot
+mid-ride leaves the auxiliary lights dark — the bike's own headlight is on its
+own circuit and unaffected.
+
+### Control and the kill switch
+
+```sh
+curl -X POST -d '{"name":"driving","set":"on"}'     http://mqttcan.local/can/output
+curl -X POST -d '{"name":"driving","set":"toggle"}' http://mqttcan.local/can/output
+mosquitto_pub -h $B -t cmnd/$N/output -m '{"name":"driving","set":"off"}'
+
+mosquitto_sub -h $B -v -t "tele/$N/gesture" -t "tele/$N/output"
+```
+
+`outputs_enable` is a live settings field. Clearing it forces every output off
+**immediately** rather than at the next gesture, and makes further gestures
+inert, without editing the decode table:
+
+```sh
+mosquitto_pub -h $B -t cmnd/$N/settings -m '{"outputs_enable":0}'
+```
+
+### Testing it without touching the bike
+
+`POST /can/inject` feeds the decoder synthetic frames, so the whole gesture path
+can be exercised on the vehicle while the controller stays listen-only. Leave
+`gpios` empty and watch the MQTT side first.
+
+```sh
+ON='{"id":"0x130","data":"00000000000009CF"}'   # D6 low nibble 9 = high beam on
+OFF='{"id":"0x130","data":"0000000000000ACF"}'  # A = off
+click() { curl -sX POST -d "$ON" $B/can/inject; curl -sX POST -d "$OFF" $B/can/inject; }
+
+click; click; click; sleep 1.5   # -> output_driving "on"
+click;             sleep 1.5     # -> "off"
+click; click;      sleep 1.5     # -> unchanged, clicks:2 is unmapped
+```
+
+Confirmed on-device 2026-09-15 on a freshly booted board: three clicks on, one
+click off, two clicks unmapped, and a 2-second hold correctly counted as no
+click at all. `/can/status` reports `outputs`, `gestures`, `outputs_enable` and
+one `output_<name>` per output.
 
 ## Bench self-test
 
