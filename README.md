@@ -369,6 +369,31 @@ ignition on; fuel 28.6 % to reserve; ambient 24 °C from `2D0` agreeing with
 pressure senders are fitted, both of which now report as such rather than
 inventing a value.
 
+### Confirmed by operating the switches
+
+Each of these was cleared to a fresh baseline, the control operated, and the
+changed byte read back. The bike agrees with the table:
+
+| Action | ID | Byte | Off | On |
+|---|---|---|---|---|
+| High beam | `130` | D6 low nibble | `A` | `9` |
+| Left indicator | `130` | D7 | `CF` | `D7` |
+| Front brake | `294` | D6 | `03` | `07` |
+| Heated grips | `2D0` | D7 high nibble | `C` | `D` low, `E` high |
+
+Engine running added rpm on `10C` D2–D3, reading 1304 at a fast cold idle.
+
+### Two negative results worth keeping
+
+**The horn is not on the bus.** Repeated presses moved no byte of any of the
+twelve IDs, including `2AC` with its mask temporarily lifted. The body module
+evidently reads the switch and drives the horn locally without telling anyone.
+Do not go looking for it.
+
+**`2A0` is unused on the K25**, despite the community sheet listing it as the
+left-hand switch cluster for this model. It sits at all `FF` with a changed mask
+of `00` indefinitely, through horn, indicator and beam operation.
+
 ### Provenance, and what is still unverified
 
 The table is the K25 subset of the community

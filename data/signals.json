@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 7,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -10,7 +10,7 @@
     "2BC": "18",
     "_2BC": "D3-D4 is a 16-bit accumulator that only runs with the engine. Measured at idle climbing about 100 counts every 300ms, strictly monotonic, and it froze the instant the ignition went off. Purpose unknown (engine revolutions, run time or fuel used are all plausible) and it is in no published decode table. It made 2BC the noisiest ID on the bus by a wide margin: 347 raw publishes from 3857 frames, 9%, versus 1% for everything else. D2 (engine temperature) is deliberately NOT masked, so real temperature changes still publish. The current value stays visible in /can/ids and on the 60s heartbeat.",
     "2AC": "03",
-    "_2AC": "D0 steps through a fixed sequence and D1's low nibble counts 0-E, per the sheet's S1000R column; this frame is otherwise undecoded and arrives every 99ms. Provisional: unmute it if D0/D1 turn out to carry state on the K25."
+    "_2AC": "CONFIRMED a rolling counter on the K25, not state. Unmasked on the vehicle 2026-09-15 during a horn test: D1 high nibble steps 0-E and wraps (low nibble static 3) and D0 steps alongside, one increment every 99ms, continuously, whatever the rider does. That matches the sheet's S1000R description closely enough to settle it. Nothing in this frame responded to any switch."
   },
   "_byte_base": "Dn is data[n]. The source table is the community BMW Motorrad CAN sheet, whose Key tab defines the payload as D0..D7; its 2013 ancestor numbered the same fields byte1..byte8, and the K25 Arduino sniffer built from that ancestor reads heated grips from data[7] and throttle from data[1], which is D7 and D1 here. Set to 1 only for a table written with D1 meaning data[0].",
   "_sources": [
