@@ -60,7 +60,13 @@ struct Settings : SettingsBase {
     // Both are read once at startup (the tables are allocated from them), so a
     // change needs a reboot.
     int maxTrackedIds  = 256;   // distinct CAN IDs in the frame table
-    int dumpRingFrames = 2048;  // raw frames retained for GET /can/dump
+    // Raw frames retained for GET /can/dump. The K25 was measured at ~1200
+    // frames/s (12 IDs, most cycling every 9-10ms), so the old 2048 held only
+    // 1.7 seconds — useless for "label an action, then read the dump", which
+    // is the whole workflow. 32768 frames is 1MB and ~27 seconds; it lands in
+    // PSRAM (8MB, almost entirely free) and is only touched by the worker task
+    // and HTTP handlers, never the ISR.
+    int dumpRingFrames = 32768;
 
     // --- Bench self-test ---
     // 1 ⇒ transmit synthetic frames to ourselves to exercise the whole

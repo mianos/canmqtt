@@ -27,6 +27,11 @@ struct IdRecord {
     // live signal bytes from constant padding and counters.
     uint8_t  changedMask = 0;
 
+    // Bytes excluded from the publish decision, from the decode table's "noise"
+    // section. changedMask deliberately still records them: muting a counter
+    // should not hide the fact that it is moving.
+    uint8_t  noiseMask   = 0;
+
     uint64_t firstSeenUs = 0;
     uint64_t lastSeenUs  = 0;
     uint64_t lastPubUs   = 0;
@@ -64,8 +69,11 @@ public:
     // Fold a frame in. Returns true if the caller should publish it, and (when
     // non-null) hands back that ID's accumulated changed-byte mask so the
     // publisher doesn't have to re-find the record.
+    // `ignoreMask` names payload bytes that must not count as a change: bit N
+    // mutes byte N. Use it for free-running counters, which otherwise defeat
+    // change detection entirely and republish at the full cyclic rate.
     bool observe(const CanFrame& f, uint32_t minIntervalMs, uint32_t heartbeatMs,
-                 uint8_t* changedMaskOut = nullptr);
+                 uint8_t* changedMaskOut = nullptr, uint8_t ignoreMask = 0);
 
     // Copy of every populated record, ascending by ID.
     std::vector<IdRecord> snapshot() const;

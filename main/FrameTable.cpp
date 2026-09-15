@@ -4,6 +4,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
+#include <new>
 
 #include "esp_log.h"
 
@@ -67,6 +68,11 @@ std::string idsJson(const FrameTable& table, uint32_t bitrate) {
                  (unsigned)r.len, r.count, r.changes, r.published, r.changedMask);
         out += head;
         out += ",\"data\":\"" + toHex(r.data, r.len) + "\"";
+        if (r.noiseMask != 0) {
+            char nm[24];
+            snprintf(nm, sizeof(nm), ",\"noise\":\"%02X\"", r.noiseMask);
+            out += nm;
+        }
         // Bus time between first and last sighting, plus the mean period. A
         // 100ms-cyclic ID and a one-shot event ID look very different here,
         // which is a useful first classification when decoding.
@@ -117,7 +123,22 @@ FrameTable::FrameTable(size_t maxIds, size_t dumpRingFrames) {
     const size_t cap = roundUpPow2(std::max<size_t>(maxIds, 8) * 2);
     slots_.resize(cap);
     mask_ = cap - 1;
-    ring_.resize(std::max<size_t>(dumpRingFrames, 16));
+    // Shrink rather than die. The ring is sized from a persisted setting, so an
+    // over-large value would otherwise throw on every boot — and because the
+    // setting lives in NVS, not the image, even an OTA rollback would not undo
+    // it. That is an unrecoverable board on a vehicle, for a buffer that is
+    // merely nice to have.
+    size_t want = std::max<size_t>(dumpRingFrames, 16);
+    while (true) {
+        try {
+            ring_.resize(want);
+            break;
+        } catch (const std::bad_alloc&) {
+            if (want <= 256) { ring_.resize(16); break; }
+            want /= 2;
+            ESP_LOGW(TAG, "dump ring too large; retrying at %u frames", (unsigned)want);
+        }
+    }
     ESP_LOGI(TAG, "%u ID slots, %u-frame dump ring (%u bytes)",
              (unsigned)cap, (unsigned)ring_.size(),
              (unsigned)(cap * sizeof(IdRecord) + ring_.size() * sizeof(CanFrame)));
@@ -145,7 +166,7 @@ IdRecord* FrameTable::find(uint32_t id, bool ext) {
 }
 
 bool FrameTable::observe(const CanFrame& f, uint32_t minIntervalMs, uint32_t heartbeatMs,
-                         uint8_t* changedMaskOut) {
+                         uint8_t* changedMaskOut, uint8_t ignoreMask) {
     LockGuard g(lock_);
     totalFrames_++;
 
@@ -172,6 +193,7 @@ bool FrameTable::observe(const CanFrame& f, uint32_t minIntervalMs, uint32_t hea
     }
 
     r->len = f.len;
+    r->noiseMask = ignoreMask;   // recorded so /can/ids can show what is muted
     std::memcpy(r->data, f.data, kCanMaxData);
     r->count++;
     if (differs && !first) r->changes++;
@@ -184,7 +206,18 @@ bool FrameTable::observe(const CanFrame& f, uint32_t minIntervalMs, uint32_t hea
 
     // A brand-new ID always publishes: that first sighting is the interesting
     // event, and waiting for it to change would hide a static ID entirely.
-    const bool payloadNew = first || std::memcmp(r->prev, f.data, kCanMaxData) != 0;
+    //
+    // Bytes in ignoreMask do not count as a change. Several IDs on this bus
+    // carry a free-running counter (3FF D2-D4 ticks once a second), and without
+    // this every such frame republishes at its full cyclic rate forever, which
+    // buries the real events and floods the broker for an entire ride.
+    bool payloadNew = first;
+    if (!first) {
+        for (size_t i = 0; i < kCanMaxData; ++i) {
+            if (ignoreMask & (1u << i)) continue;
+            if (r->prev[i] != f.data[i]) { payloadNew = true; break; }
+        }
+    }
     const uint64_t sinceUs = f.recvUs - r->lastPubUs;
     const bool throttled = !first && sinceUs < static_cast<uint64_t>(minIntervalMs) * 1000ULL;
     const bool heartbeat = heartbeatMs > 0 && !first &&

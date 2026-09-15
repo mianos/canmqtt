@@ -493,8 +493,11 @@ extern "C" void app_main(void) {
         }
 
         uint8_t chg = 0;
+        // Free-running counters would otherwise make every frame "changed" and
+        // republish the ID at its full cyclic rate for the whole ride.
+        const uint8_t noise = signals.loaded() ? signals.noiseMask(f.id) : 0;
         const bool publish = table.observe(f, settings.publishMinMs,
-                                           settings.publishHeartbeatMs, &chg);
+                                           settings.publishHeartbeatMs, &chg, noise);
         if (!publish) return;
 
         if (settings.logFrames) {

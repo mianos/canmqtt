@@ -364,6 +364,17 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
         resp.AddItem("tx_error_count", static_cast<int>(st.tx_error_count));
         resp.AddItem("rx_error_count", static_cast<int>(st.rx_error_count));
         resp.AddItem("bus_errors",     static_cast<int>(rec.bus_err_num));
+        // In listen-only mode the IDF driver writes 128 into the RX error
+        // counter before leaving reset and then freezes it (an errata
+        // workaround: error-passive guarantees the node can never emit a
+        // dominant error frame). So "passive" and 128 are the healthy reading
+        // here, not a fault, and only bus_errors carries information. Say so,
+        // because they look alarming and waste a diagnosis otherwise.
+        if (self->bus_.listenOnly()) {
+            resp.AddItem("state_note", std::string(
+                "listen-only pins state=passive and rx_error_count=128 by design; "
+                "watch bus_errors instead"));
+        }
     }
     return send_json(req, resp);
 }
@@ -490,7 +501,20 @@ esp_err_t CanWebServer::signals_status_get_handler(httpd_req_t* req) {
         if (i) out += ',';
         out += "\"0x" + canIdHex(ids[i], ids[i] > 0x7FF) + "\"";
     }
-    out += "]}";
+    out += "]";
+    const auto noise = self->signals_.noiseMasks();
+    if (!noise.empty()) {
+        out += ",\"noise\":{";
+        for (size_t i = 0; i < noise.size(); ++i) {
+            if (i) out += ',';
+            char nm[32];
+            snprintf(nm, sizeof(nm), "\"0x%s\":\"%02X\"",
+                     canIdHex(noise[i].first, noise[i].first > 0x7FF).c_str(), noise[i].second);
+            out += nm;
+        }
+        out += '}';
+    }
+    out += "}";
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, out.c_str());
 }

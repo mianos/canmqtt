@@ -61,10 +61,31 @@ Confirmed on-device during bring-up:
 
 ## Bit rate
 
-Default **500000**, and settable at runtime.
+**500000, confirmed on the vehicle** on 2026-09-15: twelve IDs decoded cleanly
+at that rate with measured cycle times matching the community sheet (`10C` 9 ms,
+`2BC` 99 ms, `3F8` 999 ms). Settable at runtime.
 
-500 kbit/s is a well-corroborated first guess but **not a confirmed BMW spec for
-the K25**, so treat it as a starting point:
+### Reading `/can/status` in listen-only mode
+
+`state` reads `passive` and `rx_error_count` reads `128` permanently, and
+**neither is a fault**. The IDF driver writes 128 into the RX error counter
+before leaving reset whenever listen-only is set, as an errata workaround: an
+error-passive node can only ever emit recessive bits, which guarantees it cannot
+disturb the bus with a dominant error frame. The counters are then frozen. Only
+`bus_errors` and `frames_rx` carry information. The response says so in a
+`state_note` field, because the raw numbers look alarming and cost a diagnosis
+otherwise.
+
+The three cases that matter:
+
+| `frames_rx` | `bus_errors` | Meaning |
+|---|---|---|
+| climbing | flat | healthy |
+| zero | climbing | wrong bit rate |
+| zero | flat | nothing on the wire: ignition off, or the tap is not connected |
+
+The original note on the rate, kept because it is still only one bike's worth of
+evidence:
 
 - A 2008 R1200GS Adventure (K25 family) with an MCP2515 got error-free frames at
   500k and **failed at 125k, 250k and 1M**. The same report saw only ~19 distinct
@@ -215,7 +236,7 @@ broker ACL or the board genuinely not publishing.
 | `GET /signals` | the decode table in use |
 | `POST /signals` | replace it (validated before storing) |
 | `GET /signals/status` | loaded?, byte_base, frame/signal counts, known IDs |
-| `GET /can/status` | bit rate, error state, counters |
+| `GET /can/status` | bit rate, error state, counters — see the listen-only caveat below |
 | `POST /can/reset` | clear table + ring (and decode state) |
 | `POST /can/mark` | label the capture; `{"text":"…"[,"reset":true]}` |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
@@ -266,7 +287,66 @@ unknown code is exactly the kind of gap this project exists to close.
 | `scale`, `offset` | `value = raw * scale + offset` |
 | `map{}` | uppercase-hex key → label; its presence makes the signal an enum |
 | `default` | label for a code missing from `map`; without it the code reports as `unmapped_0xNN` |
+| `invalid` | raw value meaning "no reading"; the signal is not reported at all |
 | `deadband`, `min_ms` | suppress chatter on analog signals |
+| `noise.<ID>` | hex mask of payload bytes that must not count as a frame change |
+
+### Free-running counters
+
+Several IDs carry a byte that increments every cycle. `3FF` D2–D4 is a seconds
+counter, measured on the bike stepping by exactly one every 1000 ms. Change
+detection is defenceless against these: the payload is always different, so the
+ID republishes at its full cyclic rate for the entire ride and buries the real
+events.
+
+`noise` mutes them per ID. Bit N mutes byte N, so `"3FF": "1C"` excludes D2, D3
+and D4 while leaving ambient light on D1 and the odometer on D5–D7 live:
+
+```json
+"noise": { "3FF": "1C", "2AC": "03" }
+```
+
+Muted bytes are still stored and still counted in the `changed` mask — hiding a
+counter from the publish decision should not hide the fact that it is moving.
+`/can/ids` shows the mask as a `noise` field on the affected row, and
+`/signals/status` lists every muted ID, which is the way to confirm the section
+parsed without waiting for bus traffic.
+
+To find a candidate, look for an ID in `/can/ids` whose `published` count is
+close to its `count`, then watch the byte in `/can/dump`.
+
+### Dump ring size
+
+The bus runs at roughly 1200 frames/s (twelve IDs, most cycling every 9–10 ms),
+so `dump_ring_frames` buys about a frame per millisecond. The default is 32768,
+which is 1 MB out of 8 MB of PSRAM and holds about 27 seconds — enough to label
+an action and then go read the dump. The old 2048 held 1.7 seconds, which was
+not.
+
+The setting is read once at startup, so a change needs a power cycle. On the
+bike that happens on every ignition cycle. An over-large value halves itself
+until it fits rather than throwing, because the value lives in NVS and not in
+the image: a failed allocation would otherwise boot-loop a board that even an
+OTA rollback could not rescue.
+
+### Confirmed on the vehicle
+
+Read from the bike on 2026-09-15, ignition on, engine off, stationary.
+`byte_base: 0` is settled three independent ways:
+
+- `2BC` gave engine 24.75 °C and air 24.75 °C. A cold engine sits at ambient, so
+  the two agreeing is the check. `byte_base: 1` yields 138 °C air on the same
+  frame.
+- Gear read `N` on a parked bike; `byte_base: 1` leaves it unmapped.
+- The odometer appears twice, at `3F8` D1–D3 and `3FF` D5–D7, and both decode to
+  118904 km. Two frames, different offsets, same number.
+
+Also confirmed: wheel speeds, throttle and rpm all zero; brake levers, high
+beam, indicators, heated grips and info button all off; lamp faults none;
+ignition on; fuel 28.6 % to reserve; ambient 24 °C from `2D0` agreeing with
+`2BC`. `2AC` exists on this bus and is in no decode table. No ESA and no tyre
+pressure senders are fitted, both of which now report as such rather than
+inventing a value.
 
 ### Provenance, and what is still unverified
 
@@ -285,13 +365,22 @@ brake levers.
 It disagrees on three nibbles, and the sheet has two internal slips. Each is
 flagged with a `_note` in the JSON and encoded as follows:
 
+Four enums did not map against the real bus, and they are exactly the ones the
+two sources disagreed about. This is the shortlist for the next session, and it
+is what [test annotations](#test-annotations) exist for: label the action, do it,
+diff the byte.
+
 - **`10C` clutch**: sheet says high nibble of `D4`, sniffer reads the low
-  nibble, same `6`/`A` values. Sheet kept. Pull the clutch and see which
-  nibble moves.
+  nibble, same `6`/`A` values. The bike read `0x16`, so the **low** nibble holds
+  `6` = clutch out, favouring the sniffer. Sheet still in place pending a test.
 - **`294` ABS state**: sheet says low nibble of `D1`, sniffer reads the high
-  nibble, same `5`/`B` values. Sheet kept.
+  nibble, same `5`/`B` values. The bike read `0x5F`, so the **high** nibble
+  holds `5` = on, again favouring the sniffer.
+- **`10C` side stand and ASC**: read `0xE9` on `D5`, matching neither source's
+  codes. `D5` is the only byte of `10C` that moved during the whole capture, so
+  the state is certainly in there.
 - **`3FF` ambient light**: sheet `B` dark / `7` light, sniffer `7` dark /
-  `3` light. Sheet kept; anything else surfaces as `unmapped_0xN`.
+  `3` light. The bike read `9` in daylight, so neither is right.
 - **`2D0` D7** carries heated grips in the high nibble (`C`/`D`/`E`, sniffer
   confirmed) and the sheet's separate ignition row (`FF` off / `DF` on) is the
   same byte seen with the grips on low. Ignition is therefore `FF` ⇒ off,

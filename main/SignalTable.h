@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "freertos/FreeRTOS.h"
@@ -36,8 +37,11 @@ struct DecodedSignal {
 //     scale/offset value = raw * scale + offset
 //     map{}        uppercase-hex key -> label; presence makes it an enum
 //     default      label for any code missing from map (else unmapped_0xNN)
+//     invalid      raw value meaning "no reading"; the signal is not reported
 //     deadband     suppress numeric reports smaller than this
 //     min_ms       per-signal floor between reports
+//   noise.<ID>     hex byte mask of free-running counters to ignore when
+//                  deciding whether a raw frame changed, e.g. "1C"
 //
 // Reporting is change-driven, matching FrameTable's policy for raw frames:
 // an enum reports when its label changes, a number when it moves further than
@@ -57,6 +61,14 @@ public:
     // Forget every signal's last-reported value, so the next frame of each ID
     // reports afresh. Pairs with FrameTable::reset().
     void resetState();
+
+    // Payload bytes for this ID that must not count as a change, from the
+    // table's "noise" section. 0 when the ID has no entry.
+    uint8_t  noiseMask(uint32_t id) const;
+
+    // Every muted ID and its mask, for /signals/status — the only way to
+    // confirm the "noise" section parsed without waiting for bus traffic.
+    std::vector<std::pair<uint32_t, uint8_t>> noiseMasks() const;
 
     bool     loaded() const { return loaded_; }
     size_t   frameCount() const;
@@ -81,6 +93,8 @@ private:
         int     decimals = 0;
         double  deadband = 0.0;
         uint32_t minMs  = 0;
+        bool     haveInvalid = false;
+        uint32_t invalid = 0;
         std::vector<Part> parts;                             // composite key
         std::unordered_map<std::string, std::string> map;    // enum
         std::string mapDefault;                              // "" => unmapped_0xNN
@@ -104,6 +118,7 @@ private:
 
     mutable SemaphoreHandle_t lock_;
     std::unordered_map<uint32_t, FrameDef> frames_;
+    std::unordered_map<uint32_t, uint8_t>  noise_;
     int  byteBase_ = 0;
     bool loaded_   = false;
 };

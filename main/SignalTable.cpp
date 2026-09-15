@@ -1,5 +1,6 @@
 #include "SignalTable.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -97,6 +98,11 @@ bool SignalTable::loadJson(const std::string& json, std::string& errorOut) {
             sd.decimals = (int)numberOr(sigJson, "decimals", 0);
             sd.deadband = numberOr(sigJson, "deadband", 0.0);
             sd.minMs    = (uint32_t)numberOr(sigJson, "min_ms", 0);
+            const cJSON* inv = cJSON_GetObjectItem(sigJson, "invalid");
+            if (cJSON_IsNumber(inv)) {
+                sd.haveInvalid = true;
+                sd.invalid     = (uint32_t)inv->valuedouble;
+            }
 
             const cJSON* bytes = cJSON_GetObjectItem(sigJson, "bytes");
             if (cJSON_IsArray(bytes)) {
@@ -147,6 +153,23 @@ bool SignalTable::loadJson(const std::string& json, std::string& errorOut) {
         }
         if (!fd.signals.empty()) built[id] = std::move(fd);
     }
+    // "noise": {"3FF": "1C"} — payload bytes that are free-running counters and
+    // must not trigger a raw-frame publish. Without this an ID carrying one
+    // republishes at its full cyclic rate for the whole ride.
+    //
+    // Must run before the cJSON_Delete below: `root` owns every node here.
+    std::unordered_map<uint32_t, uint8_t> noise;
+    const cJSON* noiseJson = cJSON_GetObjectItem(root, "noise");
+    if (cJSON_IsObject(noiseJson)) {
+        const cJSON* n = nullptr;
+        cJSON_ArrayForEach(n, noiseJson) {
+            if (n->string == nullptr || !cJSON_IsString(n)) continue;
+            if (n->string[0] == '_') continue;   // "_3FF" and friends are prose
+            noise[(uint32_t)strtoul(n->string, nullptr, 16)] =
+                (uint8_t)strtoul(n->valuestring, nullptr, 16);
+        }
+    }
+
     cJSON_Delete(root);
 
     if (built.empty()) {
@@ -160,11 +183,12 @@ bool SignalTable::loadJson(const std::string& json, std::string& errorOut) {
     {
         LockGuard g(lock_);
         frames_   = std::move(built);
+        noise_    = std::move(noise);
         byteBase_ = base;
         loaded_   = true;
     }
-    ESP_LOGI(TAG, "loaded %u frames / %u signals (byte_base %d)",
-             (unsigned)frames_.size(), (unsigned)nsig, base);
+    ESP_LOGI(TAG, "loaded %u frames / %u signals / %u muted ids (byte_base %d)",
+             (unsigned)frames_.size(), (unsigned)nsig, (unsigned)noise_.size(), base);
     errorOut.clear();
     return true;
 }
@@ -214,6 +238,11 @@ std::vector<DecodedSignal> SignalTable::decode(const CanFrame& f) {
             if (!ok) continue;
         } else {
             if (!rawValue(s, f, raw)) continue;
+            // A sentinel meaning "no sensor / no reading". Reporting the scaled
+            // value anyway is worse than silence: an unfitted RDC sender reads
+            // 0xFF, which would publish a confident and entirely fictional
+            // 5.1 bar tyre pressure.
+            if (s.haveInvalid && raw == s.invalid) continue;
             if (!s.map.empty()) {
                 key = hexKey(raw, s.nibble < 0 ? (int)(s.bytes.size() * 2) : 1);
             }
@@ -267,6 +296,19 @@ void SignalTable::resetState() {
             s.lastPubUs = 0;
         }
     }
+}
+
+uint8_t SignalTable::noiseMask(uint32_t id) const {
+    LockGuard g(lock_);
+    auto it = noise_.find(id);
+    return it == noise_.end() ? 0 : it->second;
+}
+
+std::vector<std::pair<uint32_t, uint8_t>> SignalTable::noiseMasks() const {
+    LockGuard g(lock_);
+    std::vector<std::pair<uint32_t, uint8_t>> out(noise_.begin(), noise_.end());
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 size_t SignalTable::frameCount() const {
