@@ -76,6 +76,37 @@ struct Settings : SettingsBase {
     // Applies live.
     int outputsEnable = 1;
 
+    // --- RS485 / Modbus RTU master ---
+    // Drives outputs that live away from this board — a MOSFET node at the
+    // headlight rather than a relay module under the seat.
+    //
+    // Default off: with no slave answering, every cycle costs a full response
+    // timeout and logs a failure, which is noise on a board that has no node
+    // wired to it yet. Turn it on once the node exists. Applies live — the
+    // reconciler task owns the port's lifecycle and starts or stops it on the
+    // next cycle, so nothing else can be mid-transaction when it happens.
+    int modbusEnable = 0;
+
+    // Both take effect when the port next starts, i.e. toggle modbus_enable
+    // after changing them. 19200 is Modbus RTU's conventional default and is
+    // untroubled by the length of a motorcycle; there is no reason to go
+    // faster for four coils.
+    int         modbusBaud   = 19200;
+    std::string modbusParity = "none";   // none | even | odd
+
+    // How often the master re-asserts coil state when nothing has changed. A
+    // change is written immediately (the reconciler is woken by the output
+    // change hook), so this is purely the heartbeat that resyncs a slave which
+    // rebooted or missed a frame — and, more importantly, the clock the slave
+    // measures its own comms watchdog against. The slave must hold its
+    // watchdog well above this: see the receiver notes in the README.
+    int modbusPeriodMs = 1000;
+
+    // Per-transaction response timeout. A four-coil write at 19200 baud is
+    // over in ~10ms, so 200ms is generous; it exists to bound how long a dead
+    // slave stalls the reconciler task.
+    int modbusTimeoutMs = 200;
+
     // --- Bench self-test ---
     // 1 ⇒ transmit synthetic frames to ourselves to exercise the whole
     // ISR→ring→table→MQTT path with no bus attached. Requires canListenOnly=0
@@ -98,6 +129,11 @@ struct Settings : SettingsBase {
         field("max_tracked_ids",  maxTrackedIds);
         field("dump_ring_frames", dumpRingFrames);
         field("outputs_enable",   outputsEnable);
+        field("modbus_enable",     modbusEnable);
+        field("modbus_baud",       modbusBaud);
+        field("modbus_parity",     modbusParity);
+        field("modbus_period_ms",  modbusPeriodMs);
+        field("modbus_timeout_ms", modbusTimeoutMs);
         field("self_test",        selfTest);
         load();
     }

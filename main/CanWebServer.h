@@ -6,6 +6,7 @@
 #include <string>
 
 #include "Actions.h"
+#include "ModbusBus.h"
 #include "JsonWrapper.h"
 #include "WebServer.h"
 
@@ -49,7 +50,7 @@ bool applyOutput(OutputBank& outputs, const std::string& name, const std::string
 //   POST /can/mark      drop an operator label into the capture
 //   POST /can/inject    push a synthetic frame through the software path
 //                       (no bus access, so it is safe while listen-only)
-//   POST /can/output    drive a GPIO relay by name
+//   POST /can/output    drive an output (GPIO and/or RS485 coils) by name
 //   GET  /signals       the decode table currently in use (JSON)
 //   POST /signals       replace it (validated before it is stored)
 // Handlers recover this instance from req->user_ctx.
@@ -57,7 +58,7 @@ class CanWebServer : public WebServer {
 public:
     CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
                  SignalTable& signals, MqttClient& mqtt, OutputBank& outputs,
-                 GestureEngine& gestures);
+                 GestureEngine& gestures, ModbusBus& modbus);
 
     esp_err_t start() override;
 
@@ -88,4 +89,5 @@ private:
     MqttClient&    mqtt_;
     OutputBank&    outputs_;
     GestureEngine& gestures_;
+    ModbusBus&     modbus_;
 };

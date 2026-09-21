@@ -104,6 +104,7 @@ bool OutputBank::loadJson(const std::string& json, std::string& errorOut) {
 
     std::vector<Output> built;
     std::vector<int>    claimed;
+    std::vector<Coil>   claimedCoils;
 
     const cJSON* item = nullptr;
     cJSON_ArrayForEach(item, sect) {
@@ -148,6 +149,52 @@ bool OutputBank::loadJson(const std::string& json, std::string& errorOut) {
             o.gpios.push_back((gpio_num_t)pin);
         }
 
+        const cJSON* mb = cJSON_GetObjectItem(item, "modbus");
+        if (mb != nullptr) {
+            if (!cJSON_IsObject(mb)) {
+                errorOut = o.name + ": 'modbus' must be an object";
+                cJSON_Delete(root);
+                return false;
+            }
+            const cJSON* sl = cJSON_GetObjectItem(mb, "slave");
+            if (!cJSON_IsNumber(sl) || sl->valuedouble < 1 || sl->valuedouble > 247) {
+                errorOut = o.name + ": 'modbus.slave' must be a unit id of 1..247";
+                cJSON_Delete(root);
+                return false;
+            }
+            const cJSON* coils = cJSON_GetObjectItem(mb, "coils");
+            if (!cJSON_IsArray(coils)) {
+                errorOut = o.name + ": 'modbus.coils' must be an array";
+                cJSON_Delete(root);
+                return false;
+            }
+            const cJSON* c = nullptr;
+            cJSON_ArrayForEach(c, coils) {
+                // Capped well below the protocol's 65536 because the desired
+                // state is held as a dense bitmap spanning coil 0 to the
+                // highest claimed address: a typo of 60000 would otherwise
+                // allocate 7.5KB and write it over the wire every heartbeat.
+                if (!cJSON_IsNumber(c) || c->valuedouble < 0 || c->valuedouble > 255) {
+                    errorOut = o.name + ": 'modbus.coils' must contain addresses of 0..255";
+                    cJSON_Delete(root);
+                    return false;
+                }
+                const Coil coil{(uint8_t)sl->valuedouble, (uint16_t)c->valuedouble};
+                const bool dup = std::any_of(
+                    claimedCoils.begin(), claimedCoils.end(), [&](const Coil& k) {
+                        return k.slave == coil.slave && k.addr == coil.addr;
+                    });
+                if (dup) {
+                    errorOut = o.name + ": slave " + std::to_string(coil.slave) + " coil " +
+                               std::to_string(coil.addr) + " is used twice";
+                    cJSON_Delete(root);
+                    return false;
+                }
+                claimedCoils.push_back(coil);
+                o.coils.push_back(coil);
+            }
+        }
+
         const cJSON* when = cJSON_GetObjectItem(item, "off_when");
         if (cJSON_IsObject(when)) {
             o.offWhenSignal = stringOr(when, "signal", "");
@@ -184,8 +231,8 @@ bool OutputBank::loadJson(const std::string& json, std::string& errorOut) {
             gpio_set_level(p, o.activeLow ? 1 : 0);
         }
         o.on = false;
-        ESP_LOGI(TAG, "output '%s': %u gpio(s), active_%s, auto_off %" PRIu32 "ms",
-                 o.name.c_str(), (unsigned)o.gpios.size(),
+        ESP_LOGI(TAG, "output '%s': %u gpio(s), %u coil(s), active_%s, auto_off %" PRIu32 "ms",
+                 o.name.c_str(), (unsigned)o.gpios.size(), (unsigned)o.coils.size(),
                  o.activeLow ? "low" : "high", o.autoOffMs);
     }
     errorOut.clear();
@@ -291,6 +338,50 @@ std::vector<std::pair<std::string, bool>> OutputBank::states() const {
     std::vector<std::pair<std::string, bool>> out;
     out.reserve(outputs_.size());
     for (const Output& o : outputs_) out.emplace_back(o.name, o.on);
+    return out;
+}
+
+bool OutputBank::usesModbus() const {
+    LockGuard g(lock_);
+    for (const Output& o : outputs_) if (!o.coils.empty()) return true;
+    return false;
+}
+
+std::vector<OutputBank::SlaveCoils> OutputBank::desiredCoils() const {
+    std::vector<SlaveCoils> out;
+    LockGuard g(lock_);
+
+    // Pass one sizes each slave's vector, pass two fills it. Two passes
+    // because a slave's span is only known once every output has been seen,
+    // and an output may claim coils on a slave another output also uses.
+    for (const Output& o : outputs_) {
+        for (const Coil& c : o.coils) {
+            auto it = std::find_if(out.begin(), out.end(),
+                                   [&](const SlaveCoils& s) { return s.slave == c.slave; });
+            if (it == out.end()) {
+                out.push_back(SlaveCoils{c.slave, (uint16_t)(c.addr + 1), {}});
+            } else if (c.addr + 1 > it->count) {
+                it->count = (uint16_t)(c.addr + 1);
+            }
+        }
+    }
+    for (SlaveCoils& s : out) s.bits.assign((s.count + 7) / 8, 0);
+
+    // Belt-and-braces against the kill switch. setEnabled(false) already
+    // forces every output off, so this should never be what turns a coil off —
+    // but "outputs_enable=0 means nothing is energised" is the one guarantee
+    // worth stating twice, since it is what someone reaches for at the side of
+    // the road.
+    if (!enabled_) return out;
+
+    for (const Output& o : outputs_) {
+        if (!o.on) continue;
+        for (const Coil& c : o.coils) {
+            auto it = std::find_if(out.begin(), out.end(),
+                                   [&](const SlaveCoils& s) { return s.slave == c.slave; });
+            if (it != out.end()) it->bits[c.addr / 8] |= (uint8_t)(1u << (c.addr % 8));
+        }
+    }
     return out;
 }
 

@@ -126,9 +126,9 @@ bool applyOutput(OutputBank& outputs, const std::string& name, const std::string
 
 CanWebServer::CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
                            SignalTable& signals, MqttClient& mqtt, OutputBank& outputs,
-                           GestureEngine& gestures)
+                           GestureEngine& gestures, ModbusBus& modbus)
     : WebServer(ctx), settings_(settings), bus_(bus), table_(table), signals_(signals),
-      mqtt_(mqtt), outputs_(outputs), gestures_(gestures) {}
+      mqtt_(mqtt), outputs_(outputs), gestures_(gestures), modbus_(modbus) {}
 
 esp_err_t CanWebServer::start() {
     esp_err_t r = WebServer::start();
@@ -428,6 +428,21 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
     resp.AddItem("gestures",       static_cast<int>(self->gestures_.count()));
     for (const auto& s : self->outputs_.states()) {
         resp.AddItem("output_" + s.first, std::string(s.second ? "on" : "off"));
+    }
+
+    // RS485. modbus_link is the one to read: "up" means the last coil write
+    // was acknowledged by the node, which is end-to-end confirmation that the
+    // pair, the transceivers and the slave's firmware are all alive.
+    const ModbusBus::Health mh = self->modbus_.health();
+    resp.AddItem("modbus_enable", self->settings_.modbusEnable != 0);
+    resp.AddItem("modbus_running", mh.running);
+    resp.AddItem("modbus_link",   std::string(!mh.running          ? "off"
+                                              : mh.consecErr == 0  ? "up"
+                                                                   : "down"));
+    resp.AddItem("modbus_ok",     (int)mh.ok);
+    resp.AddItem("modbus_err",    (int)mh.err);
+    if (mh.lastErr != ESP_OK) {
+        resp.AddItem("modbus_last_error", std::string(esp_err_to_name(mh.lastErr)));
     }
 
     twai_node_status_t st;

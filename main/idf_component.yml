@@ -30,3 +30,6 @@ dependencies:
   # main.cpp builds the esp_mqtt_client config directly.
   espressif/cjson: "*"
   espressif/mqtt: "*"
+
+  # Modbus RTU master on the RS485 port, for the front-of-bike MOSFET node.
+  espressif/esp-modbus: "^2.1"

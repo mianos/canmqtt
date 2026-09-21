@@ -127,7 +127,7 @@ Commands — `cmnd/mqttcan/…`:
 | `settings` | any subset of the `/config` JSON | apply + persist |
 | `canreset` | `{}` | clear the frame table + dump ring |
 | `mark` | `{"text":"test high beam"}`, optionally `"reset":true` | label the capture — see [Test annotations](#test-annotations) |
-| `output` | `{"name":"driving","set":"on"\|"off"\|"toggle"}` | drive a GPIO relay — see [Driving lights](#driving-lights) |
+| `output` | `{"name":"driving","set":"on"\|"off"\|"toggle"}` | drive an output — see [Driving lights](#driving-lights) |
 | `restart` | `{}` | reboot |
 | `reprovision` | `{}` | clear Wi-Fi creds, reboot into ESP-Touch v2 |
 
@@ -144,6 +144,7 @@ Publishes — `tele/mqttcan/…`:
 | `mark` | `{"seq":7,"text":"test high beam","reset":false,"up_ms":1234567}` |
 | `gesture` | `{"gesture":"driving_lights","clicks":3,"action":"driving=on"}` on every resolved click burst, **including unmapped counts** (`"action":""`) |
 | `output` | `{"name":"driving","state":"on","by":"gesture:3"}` on every output change, whatever caused it |
+| `modbus` | `{"link":"down","ok":412,"err":3,"last_error":"ESP_ERR_TIMEOUT"}` on RS485 link **transitions** only |
 | `stats` | bus health, 1/min — the bit-rate diagnostic |
 | `init`, `status` | identity + uptime/heap |
 | `settingsack` | full settings after a `settings` command |
@@ -242,7 +243,7 @@ broker ACL or the board genuinely not publishing.
 | `POST /can/reset` | clear table + ring (and decode state) |
 | `POST /can/mark` | label the capture; `{"text":"…"[,"reset":true]}` |
 | `POST /can/inject` | push a synthetic frame through the software path; safe while listen-only |
-| `POST /can/output` | drive a GPIO relay directly; `{"name":"driving","set":"on"}` |
+| `POST /can/output` | drive an output directly; `{"name":"driving","set":"on"}` |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
 | `GET`/`POST /firmware` | OTA (raw `.bin` body) |
 | `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base. **`/reset` wipes the Wi-Fi credentials** and reboots into provisioning; it is not a restart. To reboot after a setting that needs one, use `cmnd/<name>/restart` over MQTT or power-cycle |
@@ -590,7 +591,22 @@ comes on, one click turns them off. No extra switch on the bars, no tap into the
 loom beyond the relay feed.
 
 The CAN side is unaffected. The TWAI controller stays in hardware listen-only
-mode; the only thing that leaves the board is a logic level on a GPIO.
+mode; the only thing that leaves the board is a logic level on a GPIO, or a
+Modbus coil write on the RS485 port.
+
+An output can drive either, or both:
+
+| | |
+|---|---|
+| `gpios` | local pins on the internal P1 header, into a relay module in the same place as the board |
+| `modbus` | coils on a node at the other end of an RS485 pair |
+
+The shipped table uses **`modbus`**. The lights are at the front and the board
+is under the seat, so relay trigger wires would have to run the length of the
+frame — two more unshielded conductors alongside a CAN tap and an ignition
+harness, ending at a relay module out in the weather. One twisted pair to a
+MOSFET node at the headlight is less copper and it scales: the same pair
+carries four channels, or eight, with nothing else to run.
 
 ### What a click is
 
@@ -660,6 +676,9 @@ no firmware change.
 
 ### Where the GPIOs actually are: header P1
 
+Only needed for the `gpios` route — with the RS485 node there is nothing to
+wire here and the case can stay shut.
+
 The board looks like it has no usable I/O — screw terminals, USB-C and one
 SH1.0 UART plug (whose four wires are GND/VCC and the *console* UART, not spare
 pins). There is an **internal 2×10 header, P1**, and it breaks out twelve free
@@ -725,6 +744,99 @@ Feed the relay coils from the bike's fused accessory circuit, not from the
 board. Boot state is always off and nothing is persisted, so a crash or reboot
 mid-ride leaves the auxiliary lights dark — the bike's own headlight is on its
 own circuit and unaffected.
+
+### Over RS485: a Modbus node at the front
+
+```json
+"driving": {
+  "gpios": [],
+  "modbus": {"slave": 1, "coils": [0, 1]},
+  "active_low": false
+}
+```
+
+`active_low` applies to `gpios` only. A coil carries the logical state and the
+slave owns its own polarity — putting the inversion in two places is how you
+end up with lights that are on when the table says off.
+
+The port is off until you turn it on, because with no node answering, every
+cycle costs a full response timeout and logs a failure:
+
+```sh
+mosquitto_pub -h $B -t cmnd/$N/settings -m '{"modbus_enable":1}'
+```
+
+| Setting | Default | |
+|---|---|---|
+| `modbus_enable` | `0` | live; the reconciler starts/stops the port on its next cycle |
+| `modbus_baud` | `19200` | takes effect when the port next starts |
+| `modbus_parity` | `"none"` | `none`/`even`/`odd`; RTU's spec default is even, but both ends here are ours |
+| `modbus_period_ms` | `1000` | heartbeat re-assert; **the slave's watchdog budget** |
+| `modbus_timeout_ms` | `200` | per-transaction; bounds how long a dead node stalls the task |
+
+Pins are fixed by the board and not configurable: **TX = IO17, RX = IO18,
+DE = IO21**. `DE` is the transceiver's driver-enable and is driven as the
+UART's **RTS in `UART_MODE_RS485_HALF_DUPLEX`**, so the peripheral releases it
+only after the last stop bit has physically left the shift register. Toggling
+`DE` from software races the FIFO and clips the tail of a frame, which shows up
+as intermittent CRC errors under load rather than an obvious failure. Sources
+online disagree about whether this board needs manual `DE` control; Waveshare's
+own `WS_GPIO.h`/`WS_RS485.cpp` settle it — they use RS485 half-duplex mode.
+
+### State, not events
+
+The master does not send "turn on" when a gesture fires. It writes the
+**complete coil state** of every slave — on each change, and again every
+`modbus_period_ms` regardless.
+
+That is deliberate. A node that browns out on a pothole, resets on a damp
+connector, or is simply plugged in after the master has already booted
+converges on the right state within one heartbeat, with no handshake, no
+sequence numbers, and no recovery path to get wrong. An event protocol would
+need retries, acknowledgement and resync; state needs none of them.
+
+Two consequences worth knowing:
+
+- **The master owns the slave's whole coil space.** A slave's write spans coil
+  0 through the highest address any output claims on it, and any coil in that
+  span that no output claims is written *off*. Sharing a node with another
+  controller is not a supported arrangement.
+- A change does not wait for the heartbeat. The output change hook wakes the
+  reconciler, so a gesture reaches the wire in milliseconds; the heartbeat is
+  purely the resync.
+
+Health is end-to-end, not "did we transmit": FC `0x0F`'s normal response echoes
+the address and quantity, so a successful write means the node parsed and
+accepted it.
+
+```sh
+curl -s http://mqttcan.local/can/status | jq '{modbus_link, modbus_ok, modbus_err}'
+mosquitto_sub -h $B -v -t "tele/$N/modbus"    # link transitions only, not every cycle
+```
+
+### The receiver node
+
+The other end is a generic Modbus-RTU-to-MOSFET ESP32 — not in this repo. The
+contract it has to meet:
+
+| | |
+|---|---|
+| Unit id | `1` (matches `modbus.slave`) |
+| Serial | 19200 8N1, matching `modbus_baud`/`modbus_parity` |
+| Function codes | `0x0F` write multiple coils, starting at 0. `0x01` read coils is worth having for diagnostics but the master never uses it |
+| Coils | `0` = left lamp, `1` = right; `2`/`3` spare. Coil set ⇒ MOSFET gate on |
+| Termination | 120 Ω at each end of the pair — this is a *new* bus with two nodes, unlike the bike's CAN, where the jumper must stay off |
+
+**The node must implement a comms watchdog, and it is the actual failsafe.**
+`off_when: ignition off` in the table is *not*: if the node is on constant
+power and this board is on switched, ignition-off kills the master and the node
+simply holds its last coil state with the lights burning into a flat battery.
+So: no valid write for N seconds ⇒ all channels off. Keep N several times
+`modbus_period_ms` — 5 s against the 1 s default is sensible.
+
+The same floating-pin warning as a relay module applies to the node's gate
+pins: an ESP32 floats them through reset, and a floating gate on a logic-level
+MOSFET can conduct. Fit a pull-down at each gate.
 
 ### Control and the kill switch
 

@@ -30,7 +30,8 @@
 //   settings    any subset of the /config JSON (e.g. {"can_bitrate":125000})
 //   canreset    {}  clear the frame table + dump ring (baseline before an action)
 //   mark        {"text":"test high beam"[,"reset":true]}  label the capture
-//   output      {"name":"driving","set":"on"|"off"|"toggle"}  drive a GPIO relay
+//   output      {"name":"driving","set":"on"|"off"|"toggle"}  drive an output
+//                   (local GPIOs and/or coils on an RS485 Modbus node)
 //   restart     {}
 //   reprovision {}  clears Wi-Fi creds, reboots into ESP-Touch v2 provisioning
 // Publishes:
@@ -41,6 +42,7 @@
 //   tele/<name>/mark    {"seq":7,"text":"test high beam","reset":false,"up_ms":…}
 //   tele/<name>/gesture {"gesture":"driving_lights","clicks":3,"action":"driving=on"}
 //   tele/<name>/output  {"name":"driving","state":"on","by":"gesture:3"}
+//   tele/<name>/modbus  {"link":"down","ok":412,"err":3,...} on link transitions
 //   tele/<name>/stats   bus health + rates, 1/min — the bit-rate diagnostic
 //   tele/<name>/init,status   identity + telemetry
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
@@ -76,6 +78,7 @@
 #include "Actions.h"
 #include "CanBus.h"
 #include "CanWebServer.h"
+#include "ModbusBus.h"
 #include "FrameTable.h"
 #include "SignalTable.h"
 
@@ -99,7 +102,17 @@ struct App {
     SignalTable* signals = nullptr;
     OutputBank*  outputs = nullptr;
     GestureEngine* gestures = nullptr;
+    ModbusBus*   modbus  = nullptr;
+
+    // Announces RS485 link transitions. A std::function rather than a direct
+    // publish so the topic string stays with the other topics in app_main.
+    std::function<void(bool, const ModbusBus::Health&)> modbusReport = nullptr;
 };
+
+// Woken by the output change hook so a gesture reaches the RS485 node in
+// milliseconds instead of waiting out the heartbeat. Set before the task that
+// reads it exists, and only ever assigned once.
+TaskHandle_t g_modbusTask = nullptr;
 
 std::string uptimeString() {
     uint32_t seconds = (uint32_t)(esp_timer_get_time() / 1000000ULL);
@@ -353,6 +366,71 @@ void actionsTask(void* arg) {
     }
 }
 
+// Pushes the desired coil state of every RS485 output node onto the wire.
+//
+// Deliberately a reconciler and not an event pump. It writes the complete
+// coil state of each slave — on every change, and again every
+// modbus_period_ms whether anything changed or not. That makes the link
+// stateless in the direction that matters: a node that browns out on a pothole,
+// resets on a wet connector, or is simply plugged in after the master has
+// already booted comes back to the right state within one heartbeat, with no
+// handshake, no sequence numbers and no recovery path to get wrong.
+//
+// It also owns the port's lifecycle, rather than the settings hook doing it:
+// mbc_master_delete() while this task sits inside mbc_master_send_request()
+// would be a use-after-free, and a settings change arrives on the MQTT task.
+void modbusTask(void* arg) {
+    auto* app = static_cast<App*>(arg);
+    bool lastLinkUp = true;   // so the first failure reports a transition
+
+    for (;;) {
+        const bool want = app->settings->modbusEnable != 0;
+        if (want && !app->modbus->running()) {
+            if (app->modbus->start(app->settings->modbusBaud, app->settings->modbusParity,
+                                   (uint32_t)app->settings->modbusTimeoutMs) != ESP_OK) {
+                vTaskDelay(pdMS_TO_TICKS(5000));   // retry slowly; nothing else to do
+                continue;
+            }
+            lastLinkUp = true;
+            // Enabled with nothing to send is a configuration mistake that is
+            // otherwise completely silent: the link reports "up" forever
+            // because no transaction ever fails.
+            if (!app->outputs->usesModbus()) {
+                ESP_LOGW(TAG, "modbus_enable=1 but no output declares any coils - "
+                              "add a \"modbus\" block to an output in signals.json");
+            }
+        } else if (!want && app->modbus->running()) {
+            app->modbus->stop();
+        }
+        if (!app->modbus->running()) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        bool allOk = true;
+        for (auto& sc : app->outputs->desiredCoils()) {
+            if (app->modbus->writeCoils(sc.slave, 0, sc.count, sc.bits.data()) != ESP_OK) {
+                allOk = false;
+            }
+        }
+
+        const ModbusBus::Health h = app->modbus->health();
+        const bool linkUp = (h.consecErr == 0);
+        if (linkUp != lastLinkUp) {
+            lastLinkUp = linkUp;
+            if (app->modbusReport) app->modbusReport(linkUp, h);
+        }
+
+        // Back off once a slave has clearly gone rather than hammering a dead
+        // bus: retry briskly for the first few failures, since the usual cause
+        // is one corrupted frame and the lights should not wait a whole second
+        // for that, then settle to the heartbeat.
+        uint32_t waitMs = (uint32_t)app->settings->modbusPeriodMs;
+        if (!allOk && h.consecErr < 5) waitMs = 50;
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(waitMs));
+    }
+}
+
 // Bench only: transmit a few synthetic IDs with slowly-changing payloads so the
 // whole ISR -> queue -> table -> change-detect -> MQTT path can be exercised
 // with no bus attached. Requires can_listen_only=0 (a listen-only node
@@ -493,8 +571,10 @@ extern "C" void app_main(void) {
     // controller is untouched by any of it and stays listen-only.
     static OutputBank   outputs;
     static GestureEngine gestures(outputs);
+    static ModbusBus     modbus;
     app.outputs  = &outputs;
     app.gestures = &gestures;
+    app.modbus   = &modbus;
 
     std::string stored;
     if (signalstore::mount()) {
@@ -530,6 +610,7 @@ extern "C" void app_main(void) {
     const std::string signalTopic = "tele/" + settings.sensorName + "/signals";
     static const std::string outputTopic  = "tele/" + settings.sensorName + "/output";
     static const std::string gestureTopic = "tele/" + settings.sensorName + "/gesture";
+    static const std::string modbusTopic  = "tele/" + settings.sensorName + "/modbus";
 
     // Every output change is announced, whatever caused it, so a Node-RED panel
     // can show the true state rather than assume its own button worked.
@@ -540,7 +621,25 @@ extern "C" void app_main(void) {
         d.AddItem("by",    std::string(by));
         mqtt.publish(outputTopic, d.ToString());
         ESP_LOGI(TAG, "output %s -> %s (%s)", name.c_str(), on ? "on" : "off", by);
+        // Wake the reconciler so a remote coil follows in milliseconds rather
+        // than on the next heartbeat. Safe before the task exists: a null
+        // handle simply means nothing to notify, and the first heartbeat after
+        // it starts picks the state up anyway.
+        if (g_modbusTask != nullptr) xTaskNotifyGive(g_modbusTask);
     });
+
+    // Only transitions, not every failed cycle: a node that is unplugged over
+    // winter should cost one retained-looking message, not one per second.
+    app.modbusReport = [](bool up, const ModbusBus::Health& h) {
+        JsonWrapper d;
+        d.AddItem("link",  std::string(up ? "up" : "down"));
+        d.AddItem("ok",    (int)h.ok);
+        d.AddItem("err",   (int)h.err);
+        d.AddItem("last_error", std::string(esp_err_to_name(h.lastErr)));
+        mqtt.publish(modbusTopic, d.ToString());
+        ESP_LOGW(TAG, "RS485 link %s (ok %" PRIu32 ", err %" PRIu32 ", last %s)",
+                 up ? "up" : "down", h.ok, h.err, esp_err_to_name(h.lastErr));
+    };
 
     // Reported for every resolved burst including unmapped counts: when a
     // triple click does nothing, this is what tells you the board saw two.
@@ -661,12 +760,22 @@ extern "C" void app_main(void) {
     // when something is misbehaving and you are at the side of the road.
     settings.onChange("outputs_enable", [] {
         outputs.setEnabled(settings.outputsEnable != 0);
+        if (g_modbusTask != nullptr) xTaskNotifyGive(g_modbusTask);
+    });
+    // Poking the reconciler is all that happens here; it does the start or
+    // stop itself on its next cycle. Doing it from this callback would risk
+    // deleting the Modbus context out from under an in-flight transaction,
+    // because settings arrive on the MQTT task.
+    settings.onChange("modbus_enable", [] {
+        ESP_LOGW(TAG, "modbus_enable -> %d", settings.modbusEnable);
+        if (g_modbusTask != nullptr) xTaskNotifyGive(g_modbusTask);
     });
 
     // Web server: /healthz, /reset, /set_hostname plus /firmware, /config,
     // /config/reset, /can/ids, /can/dump, /can/status, /can/reset.
     static WebContext webctx(&wifi);
-    static CanWebServer web(&webctx, settings, bus, table, signals, mqtt, outputs, gestures);
+    static CanWebServer web(&webctx, settings, bus, table, signals, mqtt, outputs, gestures,
+                            modbus);
     web.start();
 
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);
@@ -674,6 +783,9 @@ extern "C" void app_main(void) {
     // 4096 to match the other publishing tasks: tick() can end up in
     // esp_mqtt_client_publish, which is not a small-stack call.
     xTaskCreate(actionsTask,   "actions",   4096, &app, 4, nullptr);
+    // Separate from "actions" because a Modbus transaction blocks for up to
+    // modbus_timeout_ms, and the gesture tick must keep its 25ms cadence.
+    xTaskCreate(modbusTask,    "modbus",    4096, &app, 4, &g_modbusTask);
     if (canErr == ESP_OK) {
         xTaskCreate(statsTask, "can_stats", 4096, &app, 4, nullptr);
         if (selfTest) xTaskCreate(selfTestTask, "can_selftest", 4096, &app, 3, nullptr);

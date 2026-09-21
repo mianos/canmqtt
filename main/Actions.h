@@ -25,16 +25,24 @@
 // from a slow timer task, or from an HTTP/MQTT handler that can afford to
 // block. Actuation is therefore never on the frame path.
 
-// One named output: a set of GPIOs driven together, i.e. a pair of lamps on
-// two relays that are always on or off as one.
+// One named output: a set of targets driven together, i.e. a pair of lamps
+// that are always on or off as one. A target is either a local GPIO or a coil
+// on a Modbus slave reached over RS485; an output can carry both, which is how
+// you bench-test against a relay board and drive the real node from the same
+// table.
 //
 // JSON (a top-level "outputs" object in signals.json):
 //   "driving": {
-//     "gpios": [4, 5],              which pins; empty or absent = disabled
+//     "gpios": [4, 5],              local pins; empty or absent = none
+//     "modbus": {"slave": 1, "coils": [0, 1]},   remote coils; absent = none
 //     "active_low": false,          true for relay boards that close on a low
 //     "auto_off_ms": 0,             force off after this long on (0 = never)
 //     "off_when": {"signal": "ignition", "is": "off"}
 //   }
+//
+// active_low applies to `gpios` only. A coil carries the logical state and the
+// slave decides its own polarity — putting the inversion in two places is how
+// you end up with lights that are on when the table says off.
 //
 // Boot state is always off and nothing is persisted: a reboot mid-ride leaves
 // the auxiliary lights dark, which is the safe failure. The bike's own
@@ -76,12 +84,45 @@ public:
     size_t count() const;
     std::vector<std::pair<std::string, bool>> states() const;
 
+    // The desired coil state of every Modbus slave any output refers to,
+    // packed for FC 0x0F.
+    //
+    // This is the whole master/slave protocol: not "send an event when
+    // something changes" but "here is what the coils should be, now". The
+    // reconciler writes it on every change and again on a slow heartbeat, so a
+    // slave that browned out, missed a frame, or was plugged in ten minutes
+    // late converges on the next cycle with no resync logic anywhere. Events
+    // would need retries, acknowledgement and a recovery path; state needs
+    // none of them.
+    //
+    // A slave's vector spans coil 0 through the highest address any output
+    // claims on it, and coils in that span which no output claims are written
+    // off. The master owns the slave's whole coil space — a shared slave is
+    // not a supported arrangement, and silently leaving gaps alone would be a
+    // worse surprise than saying so.
+    struct SlaveCoils {
+        uint8_t              slave;
+        uint16_t             count;   // coils 0..count-1
+        std::vector<uint8_t> bits;    // packed LSB-first, Modbus wire order
+    };
+    std::vector<SlaveCoils> desiredCoils() const;
+
+    // True if any output has at least one Modbus coil, i.e. whether the RS485
+    // reconciler has anything to do.
+    bool usesModbus() const;
+
     void onChange(ChangeFn fn) { change_ = std::move(fn); }
 
 private:
+    struct Coil {
+        uint8_t  slave;
+        uint16_t addr;
+    };
+
     struct Output {
         std::string             name;
         std::vector<gpio_num_t> gpios;
+        std::vector<Coil>       coils;
         bool                    activeLow  = false;
         uint32_t                autoOffMs  = 0;
         std::string             offWhenSignal;   // empty = no interlock
