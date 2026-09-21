@@ -408,10 +408,28 @@ void modbusTask(void* arg) {
         }
 
         bool allOk = true;
+        // What actually goes on the wire, logged only when it changes rather
+        // than on every heartbeat. esp-modbus copies this buffer verbatim into
+        // the PDU, so this *is* the frame payload: it is the only way to check
+        // bit order without a node to ask, and a bit-order slip would swap the
+        // lamps rather than fail visibly.
+        static std::string lastWire;
+        std::string wire;
         for (auto& sc : app->outputs->desiredCoils()) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), " s%u/%uc=", (unsigned)sc.slave, (unsigned)sc.count);
+            wire += buf;
+            for (uint8_t b : sc.bits) {
+                snprintf(buf, sizeof(buf), "%02X", b);
+                wire += buf;
+            }
             if (app->modbus->writeCoils(sc.slave, 0, sc.count, sc.bits.data()) != ESP_OK) {
                 allOk = false;
             }
+        }
+        if (wire != lastWire) {
+            lastWire = wire;
+            ESP_LOGI(TAG, "RS485 coils ->%s", wire.c_str());
         }
 
         const ModbusBus::Health h = app->modbus->health();
