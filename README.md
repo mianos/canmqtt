@@ -897,6 +897,23 @@ and is refused otherwise with a logged error. **Never enable it on the vehicle.*
 
 ## Implementation notes
 
+**`esp-modbus` needs a parameter descriptor even when you never use one.**
+`mbc_master_start()` fails with `ESP_ERR_INVALID_ARG` unless
+`mbc_master_set_descriptor()` has been called, although
+`mbc_master_send_request()` — the only call this driver makes — ignores the
+table entirely. Worse, omitting it does not fail *consistently*:
+`mbm_param_descriptor_size` is left uninitialised in a freshly `malloc`'d
+options block, so the check passes or fails on whatever the heap happened to
+hold. Measured on-device: start succeeded twice, then returned
+`ESP_ERR_INVALID_ARG` after a stop/start cycle, from identical code. Hence the
+one-row `kDescriptorStub` in `ModbusBus.cpp`, which exists only to satisfy that
+check and must keep static storage duration because `set_descriptor` stores the
+pointer rather than copying.
+
+The library also logs every unanswered request at `ERROR`, which with an absent
+node is one line per cycle forever, so `MB_CONTROLLER_MASTER` is set to
+`ESP_LOG_NONE` and link state is reported by our own layer instead.
+
 Two things about ESP-IDF v6's TWAI driver cost real debugging time and are worth
 knowing before editing `CanBus.cpp`.
 

@@ -479,6 +479,14 @@ extern "C" void app_main(void) {
     esp_log_level_set("frametable", ESP_LOG_INFO);
     esp_log_level_set("signals", ESP_LOG_INFO);
     esp_log_level_set("settings", ESP_LOG_INFO);
+    esp_log_level_set("actions", ESP_LOG_INFO);   // which outputs and gestures loaded
+    esp_log_level_set("modbus", ESP_LOG_INFO);
+    // esp-modbus logs every unanswered request at ERROR. With a node that is
+    // unplugged, off, or simply not built yet, that is one line per cycle
+    // forever and it buries everything else. The link state is already
+    // reported once per transition on tele/<name>/modbus and counted in
+    // /can/status, which is the same information without the firehose.
+    esp_log_level_set("MB_CONTROLLER_MASTER", ESP_LOG_NONE);
 
     static NvsStorageManager nvs;      // constructing this initialises NVS flash
     static Settings settings(nvs);

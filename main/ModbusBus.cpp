@@ -19,6 +19,39 @@ uart_parity_t parseParity(const std::string& s) {
     return UART_PARITY_DISABLE;
 }
 
+// Never read. It exists because mbc_master_start() refuses to start without a
+// parameter descriptor:
+//
+//   MB_RETURN_ON_FALSE((mbm_opts->mbm_param_descriptor_size >= 1),
+//                      ESP_ERR_INVALID_ARG, ...)
+//
+// even though mbc_master_send_request(), the only call this driver makes, does
+// not consult the table at all. Omitting set_descriptor does not fail cleanly:
+// mbm_param_descriptor_size is left uninitialised in a freshly malloc'd
+// options block, so the check passes or fails on whatever the heap happened to
+// contain. Measured on-device — start succeeded twice and then returned
+// ESP_ERR_INVALID_ARG after a stop/start cycle, from identical code.
+//
+// Static storage is required: set_descriptor keeps the pointer rather than
+// copying. cid must equal the row index, param_key must be non-null and
+// mb_size must be non-zero, which is the whole of the validation.
+const mb_parameter_descriptor_t kDescriptorStub[] = {
+    {
+        .cid = 0,
+        .param_key = "unused",
+        .param_units = "",
+        .mb_slave_addr = 1,
+        .mb_param_type = MB_PARAM_COIL,
+        .mb_reg_start = 0,
+        .mb_size = 1,
+        .param_offset = 0,
+        .param_type = PARAM_TYPE_U8,
+        .param_size = 1,
+        .param_opts = {},
+        .access = PAR_PERMS_READ_WRITE,
+    },
+};
+
 }  // namespace
 
 ModbusBus::~ModbusBus() { stop(); }
@@ -46,16 +79,24 @@ esp_err_t ModbusBus::start(int baud, const std::string& parity, uint32_t respons
     // Ordering is load-bearing and matches the component's own example: the
     // pins and the half-duplex mode must be set on the port *after* the
     // controller has created the UART driver and *before* the stack starts.
+    const char* step = "uart_set_pin";
     err = uart_set_pin((uart_port_t)modbusbus::kUartPort, modbusbus::kPinTxd,
                        modbusbus::kPinRxd, modbusbus::kPinDe, UART_PIN_NO_CHANGE);
     if (err == ESP_OK) {
+        step = "uart_set_mode";
         err = uart_set_mode((uart_port_t)modbusbus::kUartPort, UART_MODE_RS485_HALF_DUPLEX);
     }
     if (err == ESP_OK) {
+        step = "mbc_master_set_descriptor";
+        err = mbc_master_set_descriptor(ctx_, kDescriptorStub,
+                                        sizeof(kDescriptorStub) / sizeof(kDescriptorStub[0]));
+    }
+    if (err == ESP_OK) {
+        step = "mbc_master_start";
         err = mbc_master_start(ctx_);
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "RS485 bring-up failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "RS485 bring-up failed at %s: %s", step, esp_err_to_name(err));
         mbc_master_delete(ctx_);
         ctx_ = nullptr;
         return err;
