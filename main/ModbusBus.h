@@ -38,6 +38,12 @@ constexpr int kUartPort = 1;    // UART0 is the console
 constexpr int kPinTxd   = 17;
 constexpr int kPinRxd   = 18;
 constexpr int kPinDe    = 21;   // transceiver DE, driven as RTS by the UART
+
+// Holding register carrying the wall clock: two registers, a 32-bit Unix epoch
+// with the high word first. Both ends of this bus are ours, so the address is a
+// shared constant rather than a setting — mosnode's Config.h declares the same
+// number, and a mismatch would be a silent no-op.
+constexpr uint16_t kTimeReg = 0;
 }  // namespace modbusbus
 
 class ModbusBus {
@@ -76,9 +82,26 @@ public:
     // reads the coils back.
     esp_err_t writeCoils(uint8_t slave, uint16_t start, uint16_t count, uint8_t* bits);
 
+    // FC 0x10, write multiple holding registers. Used to distribute the wall
+    // clock, which Modbus itself has no notion of — there is no function code
+    // for time in the spec, so every vendor invents one, and registers written
+    // with 0x10 is the near-universal convention.
+    //
+    // Deliberately NOT counted in health(): a clock update is housekeeping, and
+    // a node that refuses it is still perfectly good at holding the driving
+    // lights on. Letting it mark the link down would turn a cosmetic failure
+    // into a reported fault on the path that matters. See modbusTask.
+    esp_err_t writeRegisters(uint8_t slave, uint16_t start, uint16_t count, uint16_t* regs);
+
     Health health() const { return health_; }
 
+    // Clock-distribution counters, kept apart from Health for the reason above.
+    uint32_t timeOk()  const { return timeOk_; }
+    uint32_t timeErr() const { return timeErr_; }
+
 private:
-    void*  ctx_ = nullptr;
-    Health health_;
+    void*    ctx_ = nullptr;
+    Health   health_;
+    uint32_t timeOk_  = 0;
+    uint32_t timeErr_ = 0;
 };

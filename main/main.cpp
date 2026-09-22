@@ -460,6 +460,7 @@ void actionsTask(void* arg) {
 void modbusTask(void* arg) {
     auto* app = static_cast<App*>(arg);
     bool lastLinkUp = true;   // so the first failure reports a transition
+    uint64_t lastTimeUs = 0;  // last clock distribution, 0 == never
 
     for (;;) {
         const bool want = app->settings->modbusEnable != 0;
@@ -470,6 +471,10 @@ void modbusTask(void* arg) {
                 continue;
             }
             lastLinkUp = true;
+            // Send the clock on the first cycle of a fresh port rather than up
+            // to a minute later. A link that has just come up is exactly where
+            // a node that rebooted and lost its clock is waiting.
+            lastTimeUs = 0;
             // Enabled with nothing to send is a configuration mistake that is
             // otherwise completely silent: the link reports "up" forever
             // because no transaction ever fails.
@@ -508,6 +513,38 @@ void modbusTask(void* arg) {
         if (wire != lastWire) {
             lastWire = wire;
             ESP_LOGI(TAG, "RS485 coils ->%s", wire.c_str());
+        }
+
+        // Clock distribution, strictly secondary to the coil write above.
+        //
+        // Modbus has no function code for time, so this is a convention rather
+        // than a standard: two holding registers at kTimeReg holding a 32-bit
+        // Unix epoch, high word first, written with FC 0x10.
+        //
+        // Three deliberate choices. It goes out *after* the coils, so a slow or
+        // refused clock update can never delay the write the lamps depend on.
+        // It is sent on its own slow cadence rather than every heartbeat,
+        // because a clock that is a second stale is still a clock. And its
+        // result is counted separately and never touches link state or the
+        // retry backoff: a node that rejects the time is still perfectly good
+        // at holding the lights on, and reporting that as a link fault would
+        // turn housekeeping into a fault on the path that matters.
+        //
+        // Sent to whichever slaves already own coils, so adding a node to the
+        // output table is all it takes for that node to get the time too.
+        if (app->settings->modbusTimeEnable != 0) {
+            const time_t now = time(nullptr);
+            const uint64_t nowUs = (uint64_t)esp_timer_get_time();
+            const uint32_t periodMs = (uint32_t)app->settings->modbusTimePeriodMs;
+            if (now > 1700000000 &&
+                (lastTimeUs == 0 || (nowUs - lastTimeUs) >= (uint64_t)periodMs * 1000ULL)) {
+                uint16_t regs[2] = { (uint16_t)((uint32_t)now >> 16),
+                                     (uint16_t)((uint32_t)now & 0xFFFF) };
+                for (auto& sc : app->outputs->desiredCoils()) {
+                    app->modbus->writeRegisters(sc.slave, modbusbus::kTimeReg, 2, regs);
+                }
+                lastTimeUs = nowUs;
+            }
         }
 
         const ModbusBus::Health h = app->modbus->health();

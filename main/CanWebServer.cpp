@@ -463,6 +463,10 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
     if (mh.lastErr != ESP_OK) {
         resp.AddItem("modbus_last_error", std::string(esp_err_to_name(mh.lastErr)));
     }
+    // Counted apart from modbus_ok/modbus_err on purpose: a clock update that
+    // fails is housekeeping, not a link fault, and must not be read as one.
+    resp.AddItem("modbus_time_ok",  static_cast<int>(self->modbus_.timeOk()));
+    resp.AddItem("modbus_time_err", static_cast<int>(self->modbus_.timeErr()));
 
     // The CAN clock candidate, reported every way it could plausibly mean
     // something. One reading on the bike with the ignition on settles which:

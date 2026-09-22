@@ -13,6 +13,9 @@ constexpr const char* TAG = "modbus";
 // component's internal mb_proto.h, which is not on the public include path.
 constexpr uint8_t kFnWriteMultipleCoils = 0x0F;
 
+// MB_FUNC_WRITE_MULTIPLE_REGISTERS, same reasoning as above.
+constexpr uint8_t kFnWriteMultipleRegisters = 0x10;
+
 uart_parity_t parseParity(const std::string& s) {
     if (s == "even") return UART_PARITY_EVEN;
     if (s == "odd")  return UART_PARITY_ODD;
@@ -139,5 +142,25 @@ esp_err_t ModbusBus::writeCoils(uint8_t slave, uint16_t start, uint16_t count, u
         health_.consecErr++;
         health_.lastErr = err;
     }
+    return err;
+}
+
+esp_err_t ModbusBus::writeRegisters(uint8_t slave, uint16_t start, uint16_t count,
+                                    uint16_t* regs) {
+    if (ctx_ == nullptr) return ESP_ERR_INVALID_STATE;
+
+    mb_param_request_t req = {};
+    req.slave_addr = slave;
+    req.command    = kFnWriteMultipleRegisters;
+    req.reg_start  = start;
+    req.reg_size   = count;
+
+    // esp-modbus takes registers in host order and handles the wire's
+    // big-endian byte order itself, unlike the coil path which is copied
+    // verbatim. Word order within a multi-register value is ours to choose;
+    // see modbusTask, which sends the epoch high word first.
+    const esp_err_t err = mbc_master_send_request(ctx_, &req, regs);
+    if (err == ESP_OK) timeOk_++;
+    else               timeErr_++;
     return err;
 }

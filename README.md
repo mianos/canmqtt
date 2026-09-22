@@ -350,6 +350,54 @@ the bike:
 To find a candidate, look for an ID in `/can/ids` whose `published` count is
 close to its `count`, then watch the byte in `/can/dump`.
 
+### The clock, and why it has to come off the bus
+
+This board runs from the bike's switched 12 V and is out of Wi-Fi range for
+almost every minute it is powered, so SNTP sets the clock in the garage and
+never again. The board's **PCF85063 RTC does not rescue that**: checked against
+[the schematic](https://files.waveshare.com/wiki/ESP32-S3-RS485-CAN/ESP32-S3-RS485-CAN-Schematic.pdf),
+its VDD is the main 3V3 rail and there is **no backup cell, no holder, not even
+an unpopulated footprint**, so it loses time at every ignition-off exactly like
+the ESP32's internal RTC. (It is on IO38 SCL / IO39 SDA / IO40 INT if it is ever
+wanted — it does survive brownouts and cranking dips that reset the ESP32,
+since it runs down to ~0.9 V. It will not survive the key.)
+
+The only clock guaranteed to be alive whenever this board is alive belongs to
+the bike. The candidate is the `3FF` D2–D4 counter above. What it counts *from*
+decides everything, and one blind reading cannot tell you:
+
+| If it is | Signature |
+|---|---|
+| seconds since local midnight | **a wall clock.** Stays under 86400, so D2 only ever holds `00` or `01` |
+| seconds since ignition on | a ride timer — restarts near zero at every key-on |
+| seconds since battery connect | a session timer, survives the key, wraps at 194 days |
+
+So the `clock` section does not guess. `mode` ships as `"observe"`, which reads
+and reports without ever touching the system clock, and `/can/status` renders
+the value every way at once:
+
+```json
+"clock_raw": 52471, "clock_as_elapsed": "0d 14h 34m 31s",
+"clock_as_tod": "14:34:32", "clock_local": "14:34:32", "clock_vs_local": 0
+```
+
+`clock_vs_local` is the measurement that settles it, and it works because the
+one test that matters is also the one moment the board knows both the bus *and*
+real time: **ignition on, stationary, within Wi-Fi range.**
+
+```sh
+curl -s http://mqttcan.local/can/status \
+  | jq '{clock_raw, clock_as_tod, clock_local, clock_vs_local, clock_as_elapsed}'
+```
+
+Near zero and it is the wall clock — set `clock.mode` to `"tod"` and upload.
+Then cycle the ignition and look again: a value that restarts near zero is a
+ride timer, one that carries on is since-battery-connect.
+
+**Even if it is seconds-since-midnight, there is no date in it.** The workable
+combination is date from NVS, last known and persisted while in Wi-Fi, plus
+time-of-day from the bus. Worth knowing before the test rather than after.
+
 ### Dump ring size
 
 The bus runs at roughly 1200 frames/s (twelve IDs, most cycling every 9–10 ms),
@@ -773,6 +821,8 @@ mosquitto_pub -h $B -t cmnd/$N/settings -m '{"modbus_enable":1}'
 | `modbus_parity` | `"none"` | `none`/`even`/`odd`; RTU's spec default is even, but both ends here are ours |
 | `modbus_period_ms` | `1000` | heartbeat re-assert; **the slave's watchdog budget** |
 | `modbus_timeout_ms` | `200` | per-transaction; bounds how long a dead node stalls the task |
+| `modbus_time_enable` | `1` | push this board's wall clock to the nodes; silent until SNTP has run |
+| `modbus_time_period_ms` | `60000` | clock cadence; a clock a minute stale is still a clock |
 
 Pins are fixed by the board and not configurable: **TX = IO17, RX = IO18,
 DE = IO21**. `DE` is the transceiver's driver-enable and is driven as the
@@ -782,6 +832,36 @@ only after the last stop bit has physically left the shift register. Toggling
 as intermittent CRC errors under load rather than an obvious failure. Sources
 online disagree about whether this board needs manual `DE` control; Waveshare's
 own `WS_GPIO.h`/`WS_RS485.cpp` settle it — they use RS485 half-duplex mode.
+
+### Sending the clock down the same pair
+
+Modbus has **no function code for time** — the spec has no notion of it, so
+every vendor invents one. The convention here is two holding registers at
+address 0 carrying a 32-bit Unix epoch, high word first, written with FC 0x10.
+Both ends are ours, so the address is a shared constant (`modbusbus::kTimeReg`
+and mosnode's `cfg::kTimeReg`) rather than a setting; a mismatch would be a
+silent no-op. Modbus *does* also define a broadcast — a write to unit 0 that
+nobody answers — which is the tidier way to reach many nodes, but this sends to
+each slave that already owns coils, so adding a node to the output table is all
+it takes for that node to get the time too.
+
+The node has no RTC and no network, so this is the only clock it can ever have.
+The point is not tidy log lines, it is that `failsafe_trips` becomes *"the link
+dropped at 14:49:30"* instead of a bare number.
+
+Three deliberate subordinations to the lights:
+
+- It goes out **after** the coil write, so a slow or refused clock update can
+  never delay the write the lamps depend on.
+- It runs on its **own slow cadence**, not every heartbeat.
+- Its result is **counted separately** (`modbus_time_ok`/`modbus_time_err`) and
+  never touches link state or the retry backoff. A node that rejects the time
+  is still perfectly good at holding the lights on, and reporting that as a
+  link fault would turn housekeeping into a fault on the path that matters.
+
+A fresh port sends the clock on its first cycle rather than up to a minute
+later, because a link that has just come up is exactly where a node that
+rebooted and lost its clock is waiting.
 
 ### State, not events
 

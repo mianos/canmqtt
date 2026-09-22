@@ -107,6 +107,21 @@ struct Settings : SettingsBase {
     // slave stalls the reconciler task.
     int modbusTimeoutMs = 200;
 
+    // --- Clock distribution over RS485 ---
+    // Push this board's wall clock to the output nodes, so their logs and their
+    // failsafe trips carry a real timestamp instead of 1970. The node has no
+    // clock of its own and no network; this is the only way it can have one.
+    //
+    // Only ever sent when this board's own clock is real, so it is silent until
+    // SNTP has run at least once — and it is the second-class citizen on the
+    // bus by design, sent after the coils and never allowed to affect link
+    // state. See modbusTask.
+    int modbusTimeEnable = 1;
+
+    // A clock a minute stale is still a clock, and the coil heartbeat is the
+    // traffic that matters. No reason to spend bus time on this more often.
+    int modbusTimePeriodMs = 60000;
+
     // --- Bench self-test ---
     // 1 ⇒ transmit synthetic frames to ourselves to exercise the whole
     // ISR→ring→table→MQTT path with no bus attached. Requires canListenOnly=0
@@ -134,6 +149,8 @@ struct Settings : SettingsBase {
         field("modbus_parity",     modbusParity);
         field("modbus_period_ms",  modbusPeriodMs);
         field("modbus_timeout_ms", modbusTimeoutMs);
+        field("modbus_time_enable",    modbusTimeEnable);
+        field("modbus_time_period_ms", modbusTimePeriodMs);
         field("self_test",        selfTest);
         load();
     }
