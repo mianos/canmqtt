@@ -114,6 +114,52 @@ struct App {
 // reads it exists, and only ever assigned once.
 TaskHandle_t g_modbusTask = nullptr;
 
+// ---------------------------------------------------------------------------
+// Deferred MQTT publishing
+// ---------------------------------------------------------------------------
+//
+// MqttClient::publish can block for ~10s against a stalled broker, and on a
+// motorcycle the broker is out of range most of the time. Anything on a
+// real-time path must therefore hand its message to this queue rather than
+// publish it directly.
+//
+// This is not tidiness. The RS485 reconciler is what keeps the driving lights
+// lit: it re-asserts coil state every second, and the node at the far end
+// drops every channel after five seconds of silence. A publish inside that
+// task means one corrupted frame flips the link state, the resulting report
+// blocks on a broker that is not there, the heartbeat stops, and the lights go
+// out at 100km/h. The same argument already applies to the CAN worker (see
+// onFrame); it applies here for higher stakes.
+//
+// Dropping a telemetry message when the queue is full is the correct trade:
+// the alternative is blocking a task whose deadline actually matters.
+struct PubMsg {
+    std::string topic;
+    std::string payload;
+};
+
+QueueHandle_t g_pubQueue = nullptr;
+
+void publishAsync(const std::string& topic, const std::string& payload) {
+    if (g_pubQueue == nullptr) return;
+    auto* msg = new PubMsg{topic, payload};
+    if (xQueueSend(g_pubQueue, &msg, 0) != pdTRUE) {
+        delete msg;   // queue full: drop it rather than wait
+        ESP_LOGW(TAG, "publish queue full; dropped %s", topic.c_str());
+    }
+}
+
+void publisherTask(void* arg) {
+    auto* app = static_cast<App*>(arg);
+    for (;;) {
+        PubMsg* msg = nullptr;
+        if (xQueueReceive(g_pubQueue, &msg, portMAX_DELAY) != pdTRUE) continue;
+        // Blocking here is fine and is the entire point of this task.
+        app->mqtt->publish(msg->topic, msg->payload);
+        delete msg;
+    }
+}
+
 std::string uptimeString() {
     uint32_t seconds = (uint32_t)(esp_timer_get_time() / 1000000ULL);
     uint32_t days = seconds / 86400; seconds %= 86400;
@@ -641,17 +687,18 @@ extern "C" void app_main(void) {
     // Every output change is announced, whatever caused it, so a Node-RED panel
     // can show the true state rather than assume its own button worked.
     outputs.onChange([](const std::string& name, bool on, const char* by) {
+        // Wake the reconciler *first*, before anything that could block, so a
+        // stalled broker cannot delay the lights. Safe before the task exists:
+        // a null handle means nothing to notify, and the next heartbeat picks
+        // the state up anyway.
+        if (g_modbusTask != nullptr) xTaskNotifyGive(g_modbusTask);
+
         JsonWrapper d;
         d.AddItem("name",  name);
         d.AddItem("state", std::string(on ? "on" : "off"));
         d.AddItem("by",    std::string(by));
-        mqtt.publish(outputTopic, d.ToString());
+        publishAsync(outputTopic, d.ToString());
         ESP_LOGI(TAG, "output %s -> %s (%s)", name.c_str(), on ? "on" : "off", by);
-        // Wake the reconciler so a remote coil follows in milliseconds rather
-        // than on the next heartbeat. Safe before the task exists: a null
-        // handle simply means nothing to notify, and the first heartbeat after
-        // it starts picks the state up anyway.
-        if (g_modbusTask != nullptr) xTaskNotifyGive(g_modbusTask);
     });
 
     // Only transitions, not every failed cycle: a node that is unplugged over
@@ -662,7 +709,7 @@ extern "C" void app_main(void) {
         d.AddItem("ok",    (int)h.ok);
         d.AddItem("err",   (int)h.err);
         d.AddItem("last_error", std::string(esp_err_to_name(h.lastErr)));
-        mqtt.publish(modbusTopic, d.ToString());
+        publishAsync(modbusTopic, d.ToString());
         ESP_LOGW(TAG, "RS485 link %s (ok %" PRIu32 ", err %" PRIu32 ", last %s)",
                  up ? "up" : "down", h.ok, h.err, esp_err_to_name(h.lastErr));
     };
@@ -674,7 +721,7 @@ extern "C" void app_main(void) {
         d.AddItem("gesture", name);
         d.AddItem("clicks",  clicks);
         d.AddItem("action",  action);   // "" when the count is unmapped
-        mqtt.publish(gestureTopic, d.ToString());
+        publishAsync(gestureTopic, d.ToString());
     });
 
     // Runs on the CanBus worker task, once per received frame. Publishing is
@@ -803,6 +850,12 @@ extern "C" void app_main(void) {
     static CanWebServer web(&webctx, settings, bus, table, signals, mqtt, outputs, gestures,
                             modbus);
     web.start();
+
+    // Before any task that might publish. 32 messages is far more than the
+    // real-time paths generate in a burst, and overflow drops rather than
+    // blocks.
+    g_pubQueue = xQueueCreate(32, sizeof(PubMsg*));
+    xTaskCreate(publisherTask, "publisher", 4096, &app, 3, nullptr);
 
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);
     xTaskCreate(telemetryTask, "telemetry", 4096, &app, 4, nullptr);
