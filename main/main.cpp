@@ -266,7 +266,6 @@ esp_err_t handleReprovision(MqttClient*, const std::string&, const JsonWrapper&,
 }
 
 // --- OTA rollback verification (see mqttradar/ws-voice for the rationale) ---
-constexpr int OTA_VERIFY_TIMEOUT_MS = 120000;
 SemaphoreHandle_t s_got_ip = nullptr;
 
 void onGotIp(void*, esp_event_base_t base, int32_t id, void*) {
@@ -296,22 +295,32 @@ void onWifiEvent(void*, esp_event_base_t base, int32_t id, void* data) {
     }
 }
 
+// Confirms a freshly OTA'd image once it has proved it can reach the network.
+//
+// There is deliberately no deadline. Waiting indefinitely looks weaker than
+// rolling back on a timer, but it is strictly safer on a vehicle and gives up
+// nothing, because the bootloader already covers both real failure modes:
+//
+//   - an image that actually crashes never gets here at all, and the next boot
+//     rolls it back unprompted. That is what CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+//     does, and it is the whole safety net;
+//   - an image that runs but cannot join Wi-Fi is left unconfirmed, so it is
+//     rolled back at the next power cycle — on a bike, the end of the ride.
+//
+// A deadline adds exactly one behaviour on top of that: rebooting a board that
+// is working perfectly well, in the middle of a ride, because it happens to be
+// out of Wi-Fi range. Here that drops the RS485 heartbeat with the lamps lit
+// and leaves the node's 5s failsafe racing a ~3s restart. The lights probably
+// survive it. "Probably" is not a good enough reason to keep the timer.
 void otaVerifyTask(void*) {
     const esp_partition_t* running = esp_ota_get_running_partition();
     esp_ota_img_states_t state;
     if (esp_ota_get_state_partition(running, &state) == ESP_OK &&
         state == ESP_OTA_IMG_PENDING_VERIFY) {
-        ESP_LOGW(TAG, "OTA: image pending verify; waiting up to %ds for connectivity",
-                 OTA_VERIFY_TIMEOUT_MS / 1000);
-        if (xSemaphoreTake(s_got_ip, pdMS_TO_TICKS(OTA_VERIFY_TIMEOUT_MS)) == pdTRUE) {
-            esp_ota_mark_app_valid_cancel_rollback();
-            ESP_LOGI(TAG, "OTA: connectivity confirmed, image marked valid");
-        } else {
-            ESP_LOGE(TAG, "OTA: no IP within timeout; rolling back to previous image");
-            esp_ota_mark_app_invalid_rollback_and_reboot();  // reboots on success
-            ESP_LOGE(TAG, "OTA: rollback not possible; keeping current image");
-            esp_ota_mark_app_valid_cancel_rollback();
-        }
+        ESP_LOGW(TAG, "OTA: image pending verify; waiting for connectivity");
+        xSemaphoreTake(s_got_ip, portMAX_DELAY);
+        esp_ota_mark_app_valid_cancel_rollback();
+        ESP_LOGI(TAG, "OTA: connectivity confirmed, image marked valid");
     }
     vTaskDelete(nullptr);
 }
@@ -624,6 +633,13 @@ extern "C" void app_main(void) {
     mqtt.registerHandler(b + "reprovision", std::regex(b + "reprovision"), handleReprovision, &app);
     mqtt.start();
 
+    // Before anything that can publish — which now includes the CAN worker, so
+    // this has to be up before bus.start() rather than at the end of app_main.
+    // 32 messages is far more than the real-time paths generate in a burst, and
+    // overflow drops rather than blocks.
+    g_pubQueue = xQueueCreate(32, sizeof(PubMsg*));
+    xTaskCreate(publisherTask, "publisher", 4096, &app, 3, nullptr);
+
     // --- CAN ---
     static FrameTable table(settings.maxTrackedIds, settings.dumpRingFrames);
     app.table = &table;
@@ -727,6 +743,16 @@ extern "C" void app_main(void) {
     // Runs on the CanBus worker task, once per received frame. Publishing is
     // gated by FrameTable::observe() so a 500kbit/s firehose becomes a trickle
     // of actual state changes.
+    //
+    // Everything here goes out through publishAsync, never mqtt.publish. This
+    // task drains the RX queue *and* feeds the gesture engine, so a stall here
+    // costs frames and misses handlebar input. MqttClient::publish is cheap
+    // while the broker is known to be disconnected — it buffers and returns —
+    // but while it still believes it is connected it writes to the socket with
+    // a 10s network timeout. That is precisely the state the board is in as the
+    // bike rides out of Wi-Fi range: association gone, TCP not yet given up. A
+    // direct publish there would freeze this task for ten seconds, overflow the
+    // 256-frame queue, and drop a triple click on the way out of the driveway.
     auto onFrame = [frameTopic, signalTopic](const CanFrame& f) {
         // Decode first, and for every frame — not just the ones that survive the
         // raw-frame filter. The two policies are independent: a signal has its
@@ -760,7 +786,7 @@ extern "C" void app_main(void) {
                         gestures.onSignal(*ds.name, ds.text, f.recvUs);
                     }
                 }
-                if (settings.publishEnable) mqtt.publish(signalTopic, sd.ToString());
+                if (settings.publishEnable) publishAsync(signalTopic, sd.ToString());
             }
         }
 
@@ -785,7 +811,7 @@ extern "C" void app_main(void) {
         d.AddItem("data", toHex(f.data, f.len));
         d.AddItem("chg",  toHex(&chg, 1));
         d.AddItem("t_us", (int)(f.timestampUs / 1000ULL));
-        mqtt.publish(frameTopic, d.ToString());
+        publishAsync(frameTopic, d.ToString());
     };
 
     const bool wantSelfTest = settings.selfTest != 0;
@@ -851,16 +877,8 @@ extern "C" void app_main(void) {
                             modbus);
     web.start();
 
-    // Before any task that might publish. 32 messages is far more than the
-    // real-time paths generate in a burst, and overflow drops rather than
-    // blocks.
-    g_pubQueue = xQueueCreate(32, sizeof(PubMsg*));
-    xTaskCreate(publisherTask, "publisher", 4096, &app, 3, nullptr);
-
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);
     xTaskCreate(telemetryTask, "telemetry", 4096, &app, 4, nullptr);
-    // 4096 to match the other publishing tasks: tick() can end up in
-    // esp_mqtt_client_publish, which is not a small-stack call.
     xTaskCreate(actionsTask,   "actions",   4096, &app, 4, nullptr);
     // Separate from "actions" because a Modbus transaction blocks for up to
     // modbus_timeout_ms, and the gesture tick must keep its 25ms cadence.
