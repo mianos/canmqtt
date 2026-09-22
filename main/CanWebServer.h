@@ -6,6 +6,7 @@
 #include <string>
 
 #include "Actions.h"
+#include "CanClock.h"
 #include "ModbusBus.h"
 #include "JsonWrapper.h"
 #include "WebServer.h"
@@ -58,7 +59,7 @@ class CanWebServer : public WebServer {
 public:
     CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
                  SignalTable& signals, MqttClient& mqtt, OutputBank& outputs,
-                 GestureEngine& gestures, ModbusBus& modbus);
+                 GestureEngine& gestures, ModbusBus& modbus, CanClock& clock);
 
     esp_err_t start() override;
 
@@ -90,4 +91,5 @@ private:
     OutputBank&    outputs_;
     GestureEngine& gestures_;
     ModbusBus&     modbus_;
+    CanClock&      clock_;
 };

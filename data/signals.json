@@ -1,5 +1,5 @@
 {
-  "version": 15,
+  "version": 16,
   "vehicle": "BMW R1200GS (K25)",
   "byte_base": 0,
   "_confirmed_on_vehicle": "2026-09-15, ignition on, engine off, stationary, odometer 118904 km. byte_base 0 verified three ways: 2BC gave engine 24.75C and air 24.75C (cold engine sits at ambient) with gear = N; 2D0 gave ambient 24C from a different sensor; and the odometer appears twice, at 3F8 D1-D3 and 3FF D5-D7, both reading 118904. byte_base 1 gives a 138C air temperature on the same frame.",
@@ -23,10 +23,19 @@
     "_": "Outputs driven from decoded signals. This is the only part of the file that makes the board act rather than watch; the CAN controller stays in hardware listen-only mode regardless. An output drives local GPIOs, remote Modbus coils, or both. gpios[] forbidden on this board: 15/16 (CAN), 17/18/21 (RS485), 26-37 (SPI flash and the octal PSRAM this ESP32-S3R8 carries), 0/3/45/46 (strapping), 19/20 (USB), 43/44 (console UART). The loader rejects those with a 400 rather than taking out the flash interface.",
     "driving": {
       "gpios": [],
-      "modbus": {"slave": 1, "coils": [0, 1]},
+      "modbus": {
+        "slave": 1,
+        "coils": [
+          0,
+          1
+        ]
+      },
       "active_low": false,
       "auto_off_ms": 0,
-      "off_when": {"signal": "ignition", "is": "off"},
+      "off_when": {
+        "signal": "ignition",
+        "is": "off"
+      },
       "_wiring": "The lights are at the front and this board is under the seat, so the relays moved out to a MOSFET node at the headlight and the two of them talk Modbus RTU over one RS485 pair. Coil 0 = left lamp, coil 1 = right. The node has four channels; coils 2 and 3 are spare and the master writes them off every cycle, because it owns the slave's whole coil space (see desiredCoils() in Actions.h). Requires modbus_enable=1 in the device settings; it ships 0 so a board with no node wired to it does not spend every cycle timing out. RS485 pins are fixed by the board: TX=IO17, RX=IO18, DE=IO21, and DE is driven as the UART's RTS in half-duplex mode, per Waveshare's own WS_GPIO.h.",
       "_gpio_alternative": "gpios[] is empty because nothing local is wired any more. To drive relays straight off this board instead, set gpios to [4, 5]: IO4 = P1 pin 11 -> relay IN1, IO5 = P1 pin 13 -> relay IN2, P1 pin 3 or 4 = GND -> relay DC-. P1 is the internal 2x10 header, confirmed from the Waveshare schematic: 1 3V3, 2 5V, 3 GND, 4 GND, 5 TXD, 6 D_P, 7 RXD, 8 D_N, 9 IO3, 10 IO14, 11 IO4, 12 IO13, 13 IO5, 14 IO12, 15 IO6, 16 IO11, 17 IO7, 18 IO10, 19 IO8, 20 IO9. IO4-IO14 are unallocated on this board per the schematic's own GPIO table; pin 9 is IO3, a strapping pin, and the loader rejects it. FIT A 10K PULL-DOWN FROM EACH IN TO DC-: the pin floats during reset and the first moments of boot, and a floating high-trigger input can close the relay. Firmware cannot cover that window. The same warning applies to the MOSFET node's own gate pins.",
       "_note": "Two auxiliary driving lights, switched together. active_low applies to gpios only - a coil carries the logical state and the slave owns its polarity. auto_off_ms 0 means no timeout; set it to e.g. 3600000 for a one-hour battery backstop. off_when drops the lights when the ZFE reports the ignition off. THAT IS NOT THE FAILSAFE: if the front node is on constant power and this board is on switched, ignition-off kills the master and the node simply holds its last coil state with the lights on. The failsafe is the node's own comms watchdog - no valid write for N seconds, everything off. Keep N several times modbus_period_ms (1000ms), e.g. 5s."
@@ -41,142 +50,499 @@
       "max_hold_ms": 900,
       "min_gap_ms": 60,
       "actions": {
-        "1": {"output": "driving", "set": "off"},
-        "3": {"output": "driving", "set": "on"}
+        "1": {
+          "output": "driving",
+          "set": "off"
+        },
+        "3": {
+          "output": "driving",
+          "set": "on"
+        }
       },
       "_note": "Three clicks of the high beam turns the driving lights on, one click turns them off. A click is a COMPLETE SHORT PULSE: the signal must reach trigger and leave it again within max_hold_ms, and it is counted on release. Holding the high beam on is therefore never a click, and a hold longer than max_hold_ms cancels a sequence in progress. TIMING, measured on the bike 2026-09-15: the 130 frame only carries high beam state every 200ms, so a click costs two frames minimum and clicks cannot be closer than about 400ms. A fast flick whose press AND release fall between two frames never reaches the bus at all, which is how a deliberate three-click burst came back as two clicks and then one. Click deliberately, around half a second apart, rather than quickly. window_ms was widened from 1000 to 2500 to absorb a dropped or late pulse; it costs nothing on the triple because a burst now fires the instant it reaches the highest mapped count (3) without waiting for the window. Only the 1-click case waits, and waiting 2.5s to switch the lights off is fine. max_hold_ms 900 so a slightly lingering press still counts rather than cancelling. The consequence of 1=off is that a deliberate flash-to-pass switches the driving lights off; that was chosen knowingly. Change the '1' key to '2' if it becomes a nuisance. Any enum signal can drive this - info_button, turn_signals - by name, with no firmware change."
     }
   ],
   "_extraction": "bytes[] is little-endian, least-significant first: (D3*256+D2) is bytes:[2,3]. nibble is 'high' or 'low'. value = raw*scale + offset. map keys are uppercase hex of the extracted value; 'default' labels any code not in the map, otherwise it reports as unmapped_0xNN. deadband/min_ms suppress chatter on analog signals.",
+  "clock": {
+    "_": "Wall clock recovered from the bus. The board runs on switched 12V and is out of Wi-Fi range whenever it matters, so SNTP sets the clock in the garage and never again; the onboard PCF85063 does not rescue that because its VDD is the main 3V3 rail with no backup cell fitted (checked against the Waveshare schematic: no battery, no holder, no footprint). The only clock alive whenever this board is alive belongs to the bike.",
+    "id": "3FF",
+    "bytes": [
+      2,
+      3,
+      4
+    ],
+    "mode": "observe",
+    "_mode": "observe = read and report only, never touch the system clock. tod = treat the field as seconds since local midnight. Stays on observe until one reading on the vehicle says which it is -- see _candidate.",
+    "_candidate": "3FF D2-D4 is a 24-bit counter measured on the bike incrementing by exactly 1 every 1000ms (see noise._3FF; it is masked there because nobody had a use for it). What it counts from is the open question and decides everything: seconds since local midnight makes it a clock and it must stay under 86400, so D2 only ever holds 00 or 01; seconds since ignition on makes it a ride timer starting near zero at every key-on; seconds since battery connect makes it a session timer that survives ignition cycles and wraps after 194 days. All three look identical in one reading taken blind, which is why /can/status reports the value every way at once.",
+    "_test": "Ignition on, stationary, within Wi-Fi range so the board also knows real time from SNTP. GET /can/status and read clock_vs_local: near 0 means seconds since local midnight, and mode can go to tod. Also compare clock_as_tod against the dash clock. Then cycle the ignition and look again -- a value that restarts near zero is a ride timer, one that carries on is since battery connect."
+  },
   "frames": {
     "10C": {
       "name": "engine",
       "_note": "asc_abs was removed here. The sheet put side stand on D5's high nibble and ASC/ABS on its low nibble; the bike proves the side stand is the LOW nibble, so the ASC signal was reading the stand and reporting off/on as the stand moved. ASC/ABS state has no confirmed home on this bus. D5's high nibble sat at E throughout and is a candidate.",
       "signals": [
-        {"name": "throttle_valve_pct", "bytes": [1], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300},
-        {"name": "rpm", "bytes": [2, 3], "scale": 0.25, "unit": "rpm", "decimals": 0, "deadband": 25, "min_ms": 500},
-        {"name": "clutch_kill", "bytes": [4], "nibble": "low",
-         "map": {"A": "clutch_in", "6": "clutch_out", "5": "kill_switch_on"},
-         "_note": "CONFIRMED on the vehicle 2026-09-15 by stopping a running engine on the kill switch. D4 went 0x16 to 0x15 at the instant rpm collapsed from 1184 to 0, a full second before the ignition went off, so it was the kill switch and not the key. The LOW nibble made that move, 6 = clutch_out to 5 = kill_switch_on, landing on the map's own values. The high nibble sat at 1 throughout and never moved. That is the sheet wrong about which nibble for the second signal in a row, and the Arduino sniffer right again. clutch_in = A is still untested: pull the lever with the engine running and watch for 6 -> A."},
-        {"name": "side_stand", "bytes": [5], "nibble": "low",
-         "map": {"9": "up", "5": "down"},
-         "_note": "CONFIRMED on the vehicle 2026-09-15, bike on the CENTRE stand so the side stand began up. D5 read E9 with it up, E5 while it was pulled down, E9 again once returned. So the low nibble carries it, 9 up and 5 down. The sheet is wrong twice over here: it names the HIGH nibble, which sat at E throughout and never moved, and it inverts the values as 5=Up 9=Down. Values were initially recorded inverted here too, from assuming a parked bike rests on its side stand; it did not. OPEN: a third value B appeared 2026-09-15 at the instant the engine was killed (D5 E9 -> EB), in the same frame as D4's clutch nibble going 6 -> 5, and reported as unmapped_0xB. So the low nibble is not purely the stand. 9=1001, 5=0101, B=1011 does not decompose cleanly into a stand bit plus a run bit; it is left unmapped rather than guessed. The stand result itself stands, having been produced by physically moving the stand twice."},
-        {"name": "throttle_pct", "bytes": [6], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 300,
-         "_note": "The current sheet says D6(High Nibble) with a /255 formula. The 2013 sheet listed this as whole byte 7 (D6) with the same formula and the K50 row uses a whole byte too; the nibble label is a later transcription slip. Whole byte used. Should track throttle_valve_pct."}
+        {
+          "name": "throttle_valve_pct",
+          "bytes": [
+            1
+          ],
+          "scale": 0.392156862,
+          "unit": "%",
+          "decimals": 1,
+          "deadband": 1.0,
+          "min_ms": 300
+        },
+        {
+          "name": "rpm",
+          "bytes": [
+            2,
+            3
+          ],
+          "scale": 0.25,
+          "unit": "rpm",
+          "decimals": 0,
+          "deadband": 25,
+          "min_ms": 500
+        },
+        {
+          "name": "clutch_kill",
+          "bytes": [
+            4
+          ],
+          "nibble": "low",
+          "map": {
+            "A": "clutch_in",
+            "6": "clutch_out",
+            "5": "kill_switch_on"
+          },
+          "_note": "CONFIRMED on the vehicle 2026-09-15 by stopping a running engine on the kill switch. D4 went 0x16 to 0x15 at the instant rpm collapsed from 1184 to 0, a full second before the ignition went off, so it was the kill switch and not the key. The LOW nibble made that move, 6 = clutch_out to 5 = kill_switch_on, landing on the map's own values. The high nibble sat at 1 throughout and never moved. That is the sheet wrong about which nibble for the second signal in a row, and the Arduino sniffer right again. clutch_in = A is still untested: pull the lever with the engine running and watch for 6 -> A."
+        },
+        {
+          "name": "side_stand",
+          "bytes": [
+            5
+          ],
+          "nibble": "low",
+          "map": {
+            "9": "up",
+            "5": "down"
+          },
+          "_note": "CONFIRMED on the vehicle 2026-09-15, bike on the CENTRE stand so the side stand began up. D5 read E9 with it up, E5 while it was pulled down, E9 again once returned. So the low nibble carries it, 9 up and 5 down. The sheet is wrong twice over here: it names the HIGH nibble, which sat at E throughout and never moved, and it inverts the values as 5=Up 9=Down. Values were initially recorded inverted here too, from assuming a parked bike rests on its side stand; it did not. OPEN: a third value B appeared 2026-09-15 at the instant the engine was killed (D5 E9 -> EB), in the same frame as D4's clutch nibble going 6 -> 5, and reported as unmapped_0xB. So the low nibble is not purely the stand. 9=1001, 5=0101, B=1011 does not decompose cleanly into a stand bit plus a run bit; it is left unmapped rather than guessed. The stand result itself stands, having been produced by physically moving the stand twice."
+        },
+        {
+          "name": "throttle_pct",
+          "bytes": [
+            6
+          ],
+          "scale": 0.392156862,
+          "unit": "%",
+          "decimals": 1,
+          "deadband": 1.0,
+          "min_ms": 300,
+          "_note": "The current sheet says D6(High Nibble) with a /255 formula. The 2013 sheet listed this as whole byte 7 (D6) with the same formula and the K50 row uses a whole byte too; the nibble label is a later transcription slip. Whole byte used. Should track throttle_valve_pct."
+        }
       ]
     },
     "130": {
       "name": "lights",
       "signals": [
-        {"name": "high_beam", "bytes": [6], "nibble": "low",
-         "map": {"9": "on", "A": "off"},
-         "_note": "Confirmed by the Arduino sniffer: LO_NIBBLE(data[6]), 9 on / A off."},
-        {"name": "turn_signals", "bytes": [7],
-         "map": {"CF": "off", "D7": "left", "E7": "right", "EF": "both"},
-         "_note": "Confirmed by the Arduino sniffer: whole data[7]."}
+        {
+          "name": "high_beam",
+          "bytes": [
+            6
+          ],
+          "nibble": "low",
+          "map": {
+            "9": "on",
+            "A": "off"
+          },
+          "_note": "Confirmed by the Arduino sniffer: LO_NIBBLE(data[6]), 9 on / A off."
+        },
+        {
+          "name": "turn_signals",
+          "bytes": [
+            7
+          ],
+          "map": {
+            "CF": "off",
+            "D7": "left",
+            "E7": "right",
+            "EF": "both"
+          },
+          "_note": "Confirmed by the Arduino sniffer: whole data[7]."
+        }
       ]
     },
     "294": {
       "name": "front_wheel",
       "signals": [
-        {"name": "abs", "bytes": [1], "nibble": "low",
-         "map": {"5": "on", "B": "off"},
-         "_note": "UNRESOLVED. Sheet says low nibble of D1, the Arduino sniffer reads the high nibble, same 5/B values. On the bike D1 read 0x5F: the HIGH nibble holds 5 = on, which favours the sniffer, and ABS being on with the ignition on is right. D1 is the only byte of 294 that moved. Cycle ABS off, mark it, and confirm."},
-        {"name": "front_wheel_speed_kmh", "bytes": [2, 3], "scale": 0.06, "unit": "km/h", "decimals": 1, "deadband": 0.5, "min_ms": 500,
-         "_note": "The ~0.06 dates from the original 2013 entry and was never firmed up. No GPS needed: at steady speed in a straight line front and rear must agree, so scale = 0.06 * rear_raw / front_raw. Adjust here once measured."},
-        {"name": "front_distance_m", "bytes": [4, 5], "scale": 0.03775, "unit": "m", "decimals": 2, "deadband": 10, "min_ms": 2000},
-        {"name": "brake_levers", "bytes": [6],
-         "map": {"03": "off", "07": "front", "0B": "rear", "0F": "both",
-                 "00": "off", "04": "front", "08": "rear", "0C": "both"},
-         "_note": "Two encodings: static values (03/07/0B/0F) and, after two full wheel revolutions, in-motion values (00/04/08/0C). Both folded into one map since the values do not collide. The Arduino sniffer reads the low nibble with 3/7/B, which is the same thing."}
+        {
+          "name": "abs",
+          "bytes": [
+            1
+          ],
+          "nibble": "low",
+          "map": {
+            "5": "on",
+            "B": "off"
+          },
+          "_note": "UNRESOLVED. Sheet says low nibble of D1, the Arduino sniffer reads the high nibble, same 5/B values. On the bike D1 read 0x5F: the HIGH nibble holds 5 = on, which favours the sniffer, and ABS being on with the ignition on is right. D1 is the only byte of 294 that moved. Cycle ABS off, mark it, and confirm."
+        },
+        {
+          "name": "front_wheel_speed_kmh",
+          "bytes": [
+            2,
+            3
+          ],
+          "scale": 0.06,
+          "unit": "km/h",
+          "decimals": 1,
+          "deadband": 0.5,
+          "min_ms": 500,
+          "_note": "The ~0.06 dates from the original 2013 entry and was never firmed up. No GPS needed: at steady speed in a straight line front and rear must agree, so scale = 0.06 * rear_raw / front_raw. Adjust here once measured."
+        },
+        {
+          "name": "front_distance_m",
+          "bytes": [
+            4,
+            5
+          ],
+          "scale": 0.03775,
+          "unit": "m",
+          "decimals": 2,
+          "deadband": 10,
+          "min_ms": 2000
+        },
+        {
+          "name": "brake_levers",
+          "bytes": [
+            6
+          ],
+          "map": {
+            "03": "off",
+            "07": "front",
+            "0B": "rear",
+            "0F": "both",
+            "00": "off",
+            "04": "front",
+            "08": "rear",
+            "0C": "both"
+          },
+          "_note": "Two encodings: static values (03/07/0B/0F) and, after two full wheel revolutions, in-motion values (00/04/08/0C). Both folded into one map since the values do not collide. The Arduino sniffer reads the low nibble with 3/7/B, which is the same thing."
+        }
       ]
     },
     "2A8": {
       "name": "rear_wheel",
       "signals": [
-        {"name": "rear_wheel_speed_kmh", "bytes": [2, 3], "scale": 0.06, "unit": "km/h", "decimals": 1, "deadband": 0.5, "min_ms": 500},
-        {"name": "rear_distance_m", "bytes": [4, 5], "scale": 0.03775, "unit": "m", "decimals": 2, "deadband": 10, "min_ms": 2000}
+        {
+          "name": "rear_wheel_speed_kmh",
+          "bytes": [
+            2,
+            3
+          ],
+          "scale": 0.06,
+          "unit": "km/h",
+          "decimals": 1,
+          "deadband": 0.5,
+          "min_ms": 500
+        },
+        {
+          "name": "rear_distance_m",
+          "bytes": [
+            4,
+            5
+          ],
+          "scale": 0.03775,
+          "unit": "m",
+          "decimals": 2,
+          "deadband": 10,
+          "min_ms": 2000
+        }
       ]
     },
     "2BC": {
       "name": "engine_status",
       "signals": [
-        {"name": "engine_temp_c", "bytes": [2], "scale": 0.75, "offset": -24, "unit": "C", "decimals": 1, "deadband": 1.0, "min_ms": 5000,
-         "_note": "deadband must exceed one quantisation step (scale), or a sensor resting between two codes reports forever. Observed on the bike dithering 0x40/0x41 = 24.0/24.8 C, which cleared the old 0.5 deadband every time. 1.0 swallows one step and still reports two."},
-        {"name": "gear", "bytes": [5], "nibble": "high",
-         "map": {"1": "1", "2": "N", "4": "2", "7": "3", "8": "4", "B": "5", "D": "6", "F": "between"},
-         "_note": "The 2013 sheet said the LOW nibble; the current sheet says HIGH, attributed to eight models including the K25, and assigns the low nibble to an oil-level fault flag. High nibble used."},
-        {"name": "air_temp_c", "bytes": [7], "scale": 0.75, "offset": -48, "unit": "C", "decimals": 1, "deadband": 1.0, "min_ms": 5000,
-         "_note": "Same 0.75 quantum as engine_temp_c, so the same deadband rule applies."}
+        {
+          "name": "engine_temp_c",
+          "bytes": [
+            2
+          ],
+          "scale": 0.75,
+          "offset": -24,
+          "unit": "C",
+          "decimals": 1,
+          "deadband": 1.0,
+          "min_ms": 5000,
+          "_note": "deadband must exceed one quantisation step (scale), or a sensor resting between two codes reports forever. Observed on the bike dithering 0x40/0x41 = 24.0/24.8 C, which cleared the old 0.5 deadband every time. 1.0 swallows one step and still reports two."
+        },
+        {
+          "name": "gear",
+          "bytes": [
+            5
+          ],
+          "nibble": "high",
+          "map": {
+            "1": "1",
+            "2": "N",
+            "4": "2",
+            "7": "3",
+            "8": "4",
+            "B": "5",
+            "D": "6",
+            "F": "between"
+          },
+          "_note": "The 2013 sheet said the LOW nibble; the current sheet says HIGH, attributed to eight models including the K25, and assigns the low nibble to an oil-level fault flag. High nibble used."
+        },
+        {
+          "name": "air_temp_c",
+          "bytes": [
+            7
+          ],
+          "scale": 0.75,
+          "offset": -48,
+          "unit": "C",
+          "decimals": 1,
+          "deadband": 1.0,
+          "min_ms": 5000,
+          "_note": "Same 0.75 quantum as engine_temp_c, so the same deadband rule applies."
+        }
       ]
     },
     "2D0": {
       "name": "body",
       "signals": [
-        {"name": "ambient_air_temp_c", "bytes": [1], "scale": 0.5, "offset": -40, "unit": "C", "decimals": 1, "deadband": 0.5, "min_ms": 5000, "invalid": 255,
-         "_note": "0xFF means no reading, seen for about a minute after the ignition is switched on before the ZFE has a value. Without the sentinel that publishes an ambient temperature of 87.5C, which is impossible on a motorcycle and was observed doing exactly that. Real readings sit around 0x7E-0x81."},
-        {"name": "lamp_fault", "bytes": [2], "nibble": "low",
-         "map": {"0": "none", "1": "low_beam", "4": "high_beam", "8": "signals"}},
-        {"name": "fuel_to_reserve_pct", "bytes": [3], "scale": 0.392156862, "unit": "%", "decimals": 1, "deadband": 1.0, "min_ms": 10000},
-        {"name": "esa_preload", "bytes": [4], "nibble": "high",
-         "map": {"1": "comf_1helm", "2": "norm_1helm", "3": "sport_1helm",
-                 "4": "comf_1helm_bag", "5": "norm_1helm_bag", "6": "sport_1helm_bag",
-                 "7": "comf_2helm", "8": "norm_2helm", "9": "sport_2helm", "C": "not_fitted"},
-         "_note": "Read C on the bike, which is 'Not Displayed' in the sheet's F800GT column, i.e. no ESA on this machine. Mapped to not_fitted rather than left unmapped. esa_damping likewise reads B,F which is outside its map."},
-        {"name": "esa_damping",
-         "parts": [{"byte": 4, "nibble": "low"}, {"byte": 7, "nibble": "low"}],
-         "map": {"B,1": "soft_smooth", "B,2": "norm_smooth", "B,3": "hard_smooth",
-                 "B,4": "soft_uneven", "B,5": "norm_uneven", "B,6": "hard_uneven",
-                 "7,1": "soft_smooth", "7,2": "norm_smooth", "7,3": "hard_smooth",
-                 "7,4": "soft_uneven", "7,5": "norm_uneven", "7,6": "hard_uneven"}},
-        {"name": "info_button", "bytes": [5], "nibble": "low",
-         "map": {"4": "off", "5": "short_press", "6": "long_press"},
-         "_note": "Confirmed by the Arduino sniffer: LO_NIBBLE(data[5]), 5 short / 6 long."},
-        {"name": "heated_grips", "bytes": [7], "nibble": "high",
-         "map": {"C": "off", "D": "low", "E": "high", "F": "unavailable"},
-         "_note": "Confirmed by the Arduino sniffer: HI_NIBBLE(data[7]), C/D/E. F is the whole-byte FF the ZFE sends with the ignition off, so it is labelled rather than reported as unmapped."},
-        {"name": "ignition", "bytes": [7],
-         "map": {"FF": "off"}, "default": "on",
-         "_note": "The sheet's FF=Off/DF=On row was contributed for the K25 and F800GSA and its 'DF' is simply the grips-low value with a fixed low nibble; it does not contradict heated_grips, it observed the same byte with the grips on low. Encoded as: FF means off, any other value means on."}
+        {
+          "name": "ambient_air_temp_c",
+          "bytes": [
+            1
+          ],
+          "scale": 0.5,
+          "offset": -40,
+          "unit": "C",
+          "decimals": 1,
+          "deadband": 0.5,
+          "min_ms": 5000,
+          "invalid": 255,
+          "_note": "0xFF means no reading, seen for about a minute after the ignition is switched on before the ZFE has a value. Without the sentinel that publishes an ambient temperature of 87.5C, which is impossible on a motorcycle and was observed doing exactly that. Real readings sit around 0x7E-0x81."
+        },
+        {
+          "name": "lamp_fault",
+          "bytes": [
+            2
+          ],
+          "nibble": "low",
+          "map": {
+            "0": "none",
+            "1": "low_beam",
+            "4": "high_beam",
+            "8": "signals"
+          }
+        },
+        {
+          "name": "fuel_to_reserve_pct",
+          "bytes": [
+            3
+          ],
+          "scale": 0.392156862,
+          "unit": "%",
+          "decimals": 1,
+          "deadband": 1.0,
+          "min_ms": 10000
+        },
+        {
+          "name": "esa_preload",
+          "bytes": [
+            4
+          ],
+          "nibble": "high",
+          "map": {
+            "1": "comf_1helm",
+            "2": "norm_1helm",
+            "3": "sport_1helm",
+            "4": "comf_1helm_bag",
+            "5": "norm_1helm_bag",
+            "6": "sport_1helm_bag",
+            "7": "comf_2helm",
+            "8": "norm_2helm",
+            "9": "sport_2helm",
+            "C": "not_fitted"
+          },
+          "_note": "Read C on the bike, which is 'Not Displayed' in the sheet's F800GT column, i.e. no ESA on this machine. Mapped to not_fitted rather than left unmapped. esa_damping likewise reads B,F which is outside its map."
+        },
+        {
+          "name": "esa_damping",
+          "parts": [
+            {
+              "byte": 4,
+              "nibble": "low"
+            },
+            {
+              "byte": 7,
+              "nibble": "low"
+            }
+          ],
+          "map": {
+            "B,1": "soft_smooth",
+            "B,2": "norm_smooth",
+            "B,3": "hard_smooth",
+            "B,4": "soft_uneven",
+            "B,5": "norm_uneven",
+            "B,6": "hard_uneven",
+            "7,1": "soft_smooth",
+            "7,2": "norm_smooth",
+            "7,3": "hard_smooth",
+            "7,4": "soft_uneven",
+            "7,5": "norm_uneven",
+            "7,6": "hard_uneven"
+          }
+        },
+        {
+          "name": "info_button",
+          "bytes": [
+            5
+          ],
+          "nibble": "low",
+          "map": {
+            "4": "off",
+            "5": "short_press",
+            "6": "long_press"
+          },
+          "_note": "Confirmed by the Arduino sniffer: LO_NIBBLE(data[5]), 5 short / 6 long."
+        },
+        {
+          "name": "heated_grips",
+          "bytes": [
+            7
+          ],
+          "nibble": "high",
+          "map": {
+            "C": "off",
+            "D": "low",
+            "E": "high",
+            "F": "unavailable"
+          },
+          "_note": "Confirmed by the Arduino sniffer: HI_NIBBLE(data[7]), C/D/E. F is the whole-byte FF the ZFE sends with the ignition off, so it is labelled rather than reported as unmapped."
+        },
+        {
+          "name": "ignition",
+          "bytes": [
+            7
+          ],
+          "map": {
+            "FF": "off"
+          },
+          "default": "on",
+          "_note": "The sheet's FF=Off/DF=On row was contributed for the K25 and F800GSA and its 'DF' is simply the grips-low value with a fixed low nibble; it does not contradict heated_grips, it observed the same byte with the grips on low. Encoded as: FF means off, any other value means on."
+        }
       ]
     },
     "32F": {
       "name": "tyre_pressure",
       "_note": "RDC IS fitted on this bike, contrary to the first reading. The senders sleep when parked and report 0xFF; moving the bike woke the front one, which then read D6=0x76 = 2.36 bar (34 psi), sane for a GS against a ~2.5 bar spec. The invalid sentinel did exactly its job: silence while asleep, real value once awake. D4 and D5 woke and slept in step with D6 and D7, so the frame is very likely front/rear pairs, D4+D6 front and D5+D7 rear, with D4/D5 as tyre temperature. D4 read 0x3E = 62, which is 22C under the -40 offset TPMS senders normally use and matches ambient. NOT added as signals: the offset is a guess and a wrong one would publish fiction, which is the mistake this file has already made twice.",
       "signals": [
-        {"name": "rdc_front_bar", "bytes": [6], "scale": 0.02, "unit": "bar", "decimals": 2, "deadband": 0.05, "min_ms": 10000, "invalid": 255},
-        {"name": "rdc_rear_bar", "bytes": [7], "scale": 0.02, "unit": "bar", "decimals": 2, "deadband": 0.05, "min_ms": 10000, "invalid": 255,
-         "_note": "Both bytes read FF on this bike, i.e. no RDC senders fitted. Without the invalid sentinel that publishes a confident and fictional 5.10 bar."}
+        {
+          "name": "rdc_front_bar",
+          "bytes": [
+            6
+          ],
+          "scale": 0.02,
+          "unit": "bar",
+          "decimals": 2,
+          "deadband": 0.05,
+          "min_ms": 10000,
+          "invalid": 255
+        },
+        {
+          "name": "rdc_rear_bar",
+          "bytes": [
+            7
+          ],
+          "scale": 0.02,
+          "unit": "bar",
+          "decimals": 2,
+          "deadband": 0.05,
+          "min_ms": 10000,
+          "invalid": 255,
+          "_note": "Both bytes read FF on this bike, i.e. no RDC senders fitted. Without the invalid sentinel that publishes a confident and fictional 5.10 bar."
+        }
       ]
     },
     "33F": {
       "name": "security",
       "signals": [
-        {"name": "theft_protection", "bytes": [2], "nibble": "low",
-         "map": {"C": "on", "D": "off"}}
+        {
+          "name": "theft_protection",
+          "bytes": [
+            2
+          ],
+          "nibble": "low",
+          "map": {
+            "C": "on",
+            "D": "off"
+          }
+        }
       ]
     },
     "3F8": {
       "name": "odometer",
       "signals": [
-        {"name": "odometer_km", "bytes": [1, 2, 3], "unit": "km", "decimals": 0, "deadband": 1, "min_ms": 10000}
+        {
+          "name": "odometer_km",
+          "bytes": [
+            1,
+            2,
+            3
+          ],
+          "unit": "km",
+          "decimals": 0,
+          "deadband": 1,
+          "min_ms": 10000
+        }
       ]
     },
     "3FF": {
       "name": "cluster",
       "signals": [
-        {"name": "ambient_light", "bytes": [1], "nibble": "low",
-         "map": {"B": "dark", "7": "light"},
-         "_note": "Sheet: B dark, 7 light, 3 and F unknown. The Arduino sniffer used 7 dark, 3 light. Read 9 on the bike in daylight with the ignition on, so neither source is right yet. Unmapped codes surface as unmapped_0xN; record what it sends in the dark and in sunlight."},
-        {"name": "odometer_km_alt", "bytes": [5, 6, 7], "unit": "km", "decimals": 0, "deadband": 1, "min_ms": 10000,
-         "_note": "Second odometer copy. Confirmed on the bike: both this and 3F8 odometer_km read 118904."}
+        {
+          "name": "ambient_light",
+          "bytes": [
+            1
+          ],
+          "nibble": "low",
+          "map": {
+            "B": "dark",
+            "7": "light"
+          },
+          "_note": "Sheet: B dark, 7 light, 3 and F unknown. The Arduino sniffer used 7 dark, 3 light. Read 9 on the bike in daylight with the ignition on, so neither source is right yet. Unmapped codes surface as unmapped_0xN; record what it sends in the dark and in sunlight."
+        },
+        {
+          "name": "odometer_km_alt",
+          "bytes": [
+            5,
+            6,
+            7
+          ],
+          "unit": "km",
+          "decimals": 0,
+          "deadband": 1,
+          "min_ms": 10000,
+          "_note": "Second odometer copy. Confirmed on the bike: both this and 3F8 odometer_km read 118904."
+        }
       ]
     },
     "7BE": {
       "name": "unknown",
       "signals": [
-        {"name": "countdown", "bytes": [6], "decimals": 0,
-         "_note": "Source lists no formula. Raw byte, published for identification."}
+        {
+          "name": "countdown",
+          "bytes": [
+            6
+          ],
+          "decimals": 0,
+          "_note": "Source lists no formula. Raw byte, published for identification."
+        }
       ]
     }
   }

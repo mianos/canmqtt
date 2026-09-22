@@ -79,6 +79,7 @@
 
 #include "Actions.h"
 #include "CanBus.h"
+#include "CanClock.h"
 #include "CanWebServer.h"
 #include "ModbusBus.h"
 #include "FrameTable.h"
@@ -105,6 +106,7 @@ struct App {
     OutputBank*  outputs = nullptr;
     GestureEngine* gestures = nullptr;
     ModbusBus*   modbus  = nullptr;
+    CanClock*    clock   = nullptr;
 
     // Announces RS485 link transitions. A std::function rather than a direct
     // publish so the topic string stays with the other topics in app_main.
@@ -681,9 +683,11 @@ extern "C" void app_main(void) {
     static OutputBank   outputs;
     static GestureEngine gestures(outputs);
     static ModbusBus     modbus;
+    static CanClock      canClock;
     app.outputs  = &outputs;
     app.gestures = &gestures;
     app.modbus   = &modbus;
+    app.clock    = &canClock;
 
     std::string stored;
     if (signalstore::mount()) {
@@ -711,6 +715,11 @@ extern "C" void app_main(void) {
             ESP_LOGE(TAG, "outputs section rejected: %s", err.c_str());
         } else if (!gestures.loadJson(stored, err)) {
             ESP_LOGE(TAG, "gestures section rejected: %s", err.c_str());
+        }
+        // Separate from the pair above: a bad clock section must not cost the
+        // driving lights their gestures, and vice versa.
+        if (!canClock.loadJson(stored, err)) {
+            ESP_LOGE(TAG, "clock section rejected: %s", err.c_str());
         }
     }
     outputs.setEnabled(settings.outputsEnable != 0);
@@ -775,6 +784,11 @@ extern "C" void app_main(void) {
     // direct publish there would freeze this task for ten seconds, overflow the
     // 256-frame queue, and drop a triple click on the way out of the driveway.
     auto onFrame = [frameTopic, signalTopic](const CanFrame& f) {
+        // Before anything that can be filtered. The clock counter lives under
+        // the noise mask, so it is invisible to every publish decision below
+        // and has to be sampled from the raw frame or not at all. Records only.
+        canClock.onFrame(f);
+
         // Decode first, and for every frame — not just the ones that survive the
         // raw-frame filter. The two policies are independent: a signal has its
         // own deadband and min_ms, and gating it behind publish_min_ms would
@@ -895,7 +909,7 @@ extern "C" void app_main(void) {
     // /config/reset, /can/ids, /can/dump, /can/status, /can/reset.
     static WebContext webctx(&wifi);
     static CanWebServer web(&webctx, settings, bus, table, signals, mqtt, outputs, gestures,
-                            modbus);
+                            modbus, canClock);
     web.start();
 
     xTaskCreate(otaVerifyTask, "ota_verify", 4096, nullptr, 4, nullptr);

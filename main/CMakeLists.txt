@@ -2,7 +2,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 idf_component_register(SRCS "main.cpp" "CanBus.cpp" "FrameTable.cpp" "CanWebServer.cpp" "SignalTable.cpp"
-                            "Actions.cpp" "ModbusBus.cpp"
+                            "Actions.cpp" "ModbusBus.cpp" "CanClock.cpp"
                        INCLUDE_DIRS "."
                        REQUIRES
                          nvsstoragemanager

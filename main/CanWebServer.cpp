@@ -126,9 +126,9 @@ bool applyOutput(OutputBank& outputs, const std::string& name, const std::string
 
 CanWebServer::CanWebServer(WebContext* ctx, Settings& settings, CanBus& bus, FrameTable& table,
                            SignalTable& signals, MqttClient& mqtt, OutputBank& outputs,
-                           GestureEngine& gestures, ModbusBus& modbus)
+                           GestureEngine& gestures, ModbusBus& modbus, CanClock& clock)
     : WebServer(ctx), settings_(settings), bus_(bus), table_(table), signals_(signals),
-      mqtt_(mqtt), outputs_(outputs), gestures_(gestures), modbus_(modbus) {}
+      mqtt_(mqtt), outputs_(outputs), gestures_(gestures), modbus_(modbus), clock_(clock) {}
 
 esp_err_t CanWebServer::start() {
     esp_err_t r = WebServer::start();
@@ -464,6 +464,46 @@ esp_err_t CanWebServer::can_status_get_handler(httpd_req_t* req) {
         resp.AddItem("modbus_last_error", std::string(esp_err_to_name(mh.lastErr)));
     }
 
+    // The CAN clock candidate, reported every way it could plausibly mean
+    // something. One reading on the bike with the ignition on settles which:
+    //
+    //   clock_as_tod matches the dash clock  -> seconds since local midnight,
+    //                                           and there is the wall clock
+    //   clock_as_elapsed near zero at key-on -> a ride timer, no date in it
+    //   clock_as_elapsed large and surviving
+    //     an ignition cycle                  -> seconds since battery connect
+    //
+    // clock_vs_local does the comparison on the device when it happens to know
+    // the real time, which is the case for exactly the test that matters:
+    // ignition on, stationary, within Wi-Fi range of the garage.
+    const CanClock::Reading cr = self->clock_.reading();
+    resp.AddItem("clock_configured", self->clock_.configured());
+    if (self->clock_.configured()) {
+        char idbuf[12];
+        snprintf(idbuf, sizeof(idbuf), "0x%03" PRIX32, self->clock_.id());
+        resp.AddItem("clock_id",   std::string(idbuf));
+        resp.AddItem("clock_mode", std::string(
+            self->clock_.mode() == CanClock::Mode::Tod ? "tod" : "observe"));
+        resp.AddItem("clock_seen", cr.valid);
+    }
+    if (cr.valid) {
+        resp.AddItem("clock_raw",         static_cast<int>(cr.raw));
+        resp.AddItem("clock_updates",     static_cast<int>(cr.updates));
+        resp.AddItem("clock_as_elapsed",  canClockElapsedString(cr.raw));
+        uint32_t tod = 0;
+        if (self->clock_.timeOfDay(tod)) {
+            resp.AddItem("clock_as_tod", canClockTodString(tod));
+            int      offset   = 0;
+            uint32_t localTod = 0;
+            if (self->clock_.offsetVsLocal(offset, localTod)) {
+                resp.AddItem("clock_local",    canClockTodString(localTod));
+                resp.AddItem("clock_vs_local", offset);
+            }
+        } else {
+            resp.AddItem("clock_as_tod", std::string("n/a - exceeds 86400"));
+        }
+    }
+
     twai_node_status_t st;
     twai_node_record_t rec;
     if (self->bus_.info(st, rec) == ESP_OK) {
@@ -692,6 +732,10 @@ esp_err_t CanWebServer::signals_post_handler(httpd_req_t* req) {
     // fires. The decode table is already live at this point, which is the right
     // trade — the table is the thing you cannot afford to lose.
     if (!self->outputs_.loadJson(body, err) || !self->gestures_.loadJson(body, err)) {
+        ESP_LOGW(TAG, "rejected signals upload: %s", err.c_str());
+        return sendJsonError(req, 400, err);
+    }
+    if (!self->clock_.loadJson(body, err)) {
         ESP_LOGW(TAG, "rejected signals upload: %s", err.c_str());
         return sendJsonError(req, 400, err);
     }
