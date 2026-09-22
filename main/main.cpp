@@ -48,12 +48,14 @@
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
 //       /can/mark /can/inject /can/output /signals
 
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
 #include <cstdlib>
 #include <ctime>
 #include <regex>
 #include <string>
+#include <utility>
 
 #include "esp_app_desc.h"
 #include "esp_event.h"
@@ -140,12 +142,21 @@ struct PubMsg {
 
 QueueHandle_t g_pubQueue = nullptr;
 
+// Messages refused because the queue was full. Counted here and reported from
+// publisherTask, never logged at the point of the drop. publishAsync runs on
+// the real-time tasks and the console is UART0, so a log line is a blocking
+// write of several milliseconds. In a stalled-broker window the frame path can
+// try to publish a hundred times a second; logging each refusal would rebuild
+// on the CAN worker, one line at a time, the very stall this queue exists to
+// keep off it.
+std::atomic<uint32_t> g_pubDropped{0};
+
 void publishAsync(const std::string& topic, const std::string& payload) {
     if (g_pubQueue == nullptr) return;
     auto* msg = new PubMsg{topic, payload};
     if (xQueueSend(g_pubQueue, &msg, 0) != pdTRUE) {
         delete msg;   // queue full: drop it rather than wait
-        ESP_LOGW(TAG, "publish queue full; dropped %s", topic.c_str());
+        g_pubDropped.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -155,8 +166,18 @@ void publisherTask(void* arg) {
         PubMsg* msg = nullptr;
         if (xQueueReceive(g_pubQueue, &msg, portMAX_DELAY) != pdTRUE) continue;
         // Blocking here is fine and is the entire point of this task.
-        app->mqtt->publish(msg->topic, msg->payload);
+        app->mqtt->publish(std::move(msg->topic), std::move(msg->payload));
         delete msg;
+
+        // Once the backlog has cleared, say what the stall cost: one line per
+        // episode, from the task that was doing the stalling.
+        if (uxQueueMessagesWaiting(g_pubQueue) == 0) {
+            const uint32_t dropped = g_pubDropped.exchange(0, std::memory_order_relaxed);
+            if (dropped > 0) {
+                ESP_LOGW(TAG, "publish stalled; dropped %" PRIu32 " message(s) while the "
+                              "broker was unreachable", dropped);
+            }
+        }
     }
 }
 

@@ -245,7 +245,7 @@ broker ACL or the board genuinely not publishing.
 | `POST /can/inject` | push a synthetic frame through the software path; safe while listen-only |
 | `POST /can/output` | drive an output directly; `{"name":"driving","set":"on"}` |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
-| `GET`/`POST /firmware` | OTA (raw `.bin` body) |
+| `GET`/`POST /firmware` | OTA (raw `.bin` body). `GET` reports `ota_state` — a new image confirms itself once it has an IP, with no deadline, so one powered off while still `pending_verify` silently boots the previous image next time. Check for `valid` before pulling power |
 | `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base. **`/reset` wipes the Wi-Fi credentials** and reboots into provisioning; it is not a restart. To reboot after a setting that needs one, use `cmnd/<name>/restart` over MQTT or power-cycle |
 
 The shared `WebServer` starts httpd with `max_uri_handlers = 16` and spends

@@ -254,6 +254,24 @@ esp_err_t CanWebServer::firmware_post_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// ota_state is the field to check after an OTA. The image confirms itself only
+// once it has an IP and there is no deadline on that, so a board powered off
+// while still "pending_verify" boots the *previous* image next time, silently.
+// Wait for "valid" before pulling the plug.
+static const char* otaStateName(const esp_partition_t* running) {
+    esp_ota_img_states_t st;
+    if (esp_ota_get_state_partition(running, &st) != ESP_OK) return "unknown";
+    switch (st) {
+        case ESP_OTA_IMG_NEW:            return "new";
+        case ESP_OTA_IMG_PENDING_VERIFY: return "pending_verify";
+        case ESP_OTA_IMG_VALID:          return "valid";
+        case ESP_OTA_IMG_INVALID:        return "invalid";
+        case ESP_OTA_IMG_ABORTED:        return "aborted";
+        case ESP_OTA_IMG_UNDEFINED:      return "undefined";
+    }
+    return "unknown";
+}
+
 esp_err_t CanWebServer::firmware_get_handler(httpd_req_t* req) {
     const esp_app_desc_t*  desc    = esp_app_get_description();
     const esp_partition_t* running = esp_ota_get_running_partition();
@@ -263,6 +281,7 @@ esp_err_t CanWebServer::firmware_get_handler(httpd_req_t* req) {
     resp.AddItem("date",      std::string(desc->date));
     resp.AddItem("time",      std::string(desc->time));
     resp.AddItem("partition", std::string(running->label));
+    resp.AddItem("ota_state", std::string(otaStateName(running)));
     return send_json(req, resp);
 }
 
