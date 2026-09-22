@@ -373,8 +373,10 @@ decides everything, and one blind reading cannot tell you:
 | seconds since battery connect | a session timer, survives the key, wraps at 194 days |
 
 So the `clock` section does not guess. `mode` ships as `"observe"`, which reads
-and reports without ever touching the system clock, and `/can/status` renders
-the value every way at once:
+and reports without ever touching the system clock — and **`"observe"` is the
+only mode implemented.** `"tod"` is reserved and rejected at upload, precisely
+so it cannot sit in a table pretending to work; see below for what it still
+needs. `/can/status` renders the value every way at once:
 
 ```json
 "clock_raw": 52471, "clock_as_elapsed": "0d 14h 34m 31s",
@@ -390,13 +392,28 @@ curl -s http://mqttcan.local/can/status \
   | jq '{clock_raw, clock_as_tod, clock_local, clock_vs_local, clock_as_elapsed}'
 ```
 
-Near zero and it is the wall clock — set `clock.mode` to `"tod"` and upload.
-Then cycle the ignition and look again: a value that restarts near zero is a
-ride timer, one that carries on is since-battery-connect.
+Near zero and it is the wall clock. Then cycle the ignition and look again: a
+value that restarts near zero is a ride timer, one that carries on is
+since-battery-connect.
 
-**Even if it is seconds-since-midnight, there is no date in it.** The workable
-combination is date from NVS, last known and persisted while in Wi-Fi, plus
-time-of-day from the bus. Worth knowing before the test rather than after.
+### What still has to be built after that
+
+Identifying the counter is a measurement, not a switch. **Nothing sets the
+system clock from the bus today** — only SNTP does. Which means that on the
+bike, where the board loses power at every ignition-off, timestamps are real
+only for a ride that *started* in Wi-Fi range and never cycled the key. A
+fuelling stop, or a ride that starts anywhere else, and the master has no clock
+and therefore sends none to the node either.
+
+Closing that needs two things this does not have:
+
+- **A date.** A seconds-since-midnight field carries no day. The workable
+  combination is date from NVS — last known, persisted while the clock is
+  valid, restored on a coldboot — plus time-of-day from the bus. The day count
+  across a long stand is unknowable, so anything derived this way has to carry
+  an honest `time_source` rather than pass itself off as SNTP-grade.
+- **A precedence rule**, so SNTP wins when it is available and the bus fills in
+  when it is not, without the two fighting each other on every heartbeat.
 
 ### Dump ring size
 

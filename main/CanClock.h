@@ -43,11 +43,24 @@ struct CanFrame;
 // this module deliberately does not guess. In the default "observe" mode it
 // only reports the raw value and both interpretations, which is what turns one
 // glance at /can/status into a settled answer.
+//
+// To be clear about what this does NOT do: it never sets the system clock.
+// Today the only thing that does is SNTP, which means that on the bike, where
+// the board loses power at every ignition-off, the clock is real only for a
+// ride that started within Wi-Fi range and did not cycle the key. Closing that
+// gap is the whole point of identifying the counter, and it is still ahead.
 class CanClock {
 public:
     enum class Mode {
         Observe,   // read and report only; never touches the system clock
-        Tod,       // treat the field as seconds since local midnight
+        // Reserved: treat the field as seconds since local midnight and set
+        // the system clock from it. NOT IMPLEMENTED -- loadJson rejects it
+        // rather than accept a setting that would silently do nothing. The
+        // missing piece is a date: a seconds-since-midnight field carries no
+        // day, so this needs a last-known epoch persisted to NVS and restored
+        // on a coldboot, plus an honest time_source on anything derived from
+        // it. Nothing in this class sets the clock today.
+        Tod,
     };
 
     struct Reading {

@@ -111,10 +111,28 @@ bool CanClock::loadJson(const std::string& json, std::string& errorOut) {
     const cJSON* modeItem = cJSON_GetObjectItem(sect, "mode");
     if (cJSON_IsString(modeItem) && modeItem->valuestring != nullptr) {
         const std::string m = modeItem->valuestring;
-        if      (m == "observe") mode = Mode::Observe;
-        else if (m == "tod")     mode = Mode::Tod;
-        else {
-            errorOut = "clock: 'mode' must be \"observe\" or \"tod\"";
+        if (m == "observe") {
+            mode = Mode::Observe;
+        } else if (m == "tod") {
+            // Reserved, not implemented, and rejected rather than accepted
+            // quietly. Accepting it would be a setting that claims to set the
+            // clock and does not — the same silent-no-op trap as a mismatched
+            // register address, and it would be discovered on the bike months
+            // later. Same policy as a bad output or gesture: fail at upload.
+            //
+            // What is missing is not the plumbing but a date. A
+            // seconds-since-midnight field carries no day, so making this real
+            // needs a date source (last-known epoch persisted to NVS, restored
+            // on a coldboot) and an honest time_source on everything derived
+            // from it. Not worth building against an unconfirmed hypothesis.
+            errorOut = "clock: mode \"tod\" is reserved and not implemented yet - "
+                       "a seconds-since-midnight field carries no date, so it needs "
+                       "a persisted date source first. Use \"observe\" and read "
+                       "clock_vs_local from /can/status";
+            cJSON_Delete(root);
+            return false;
+        } else {
+            errorOut = "clock: 'mode' must be \"observe\"";
             cJSON_Delete(root);
             return false;
         }
