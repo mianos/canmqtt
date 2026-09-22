@@ -814,6 +814,21 @@ curl -s http://mqttcan.local/can/status | jq '{modbus_link, modbus_ok, modbus_er
 mosquitto_sub -h $B -v -t "tele/$N/modbus"    # link transitions only, not every cycle
 ```
 
+### Verified against the real node
+
+2026-09-22, master and [mosnode](../mosnode) wired over RS485:
+
+```
+mqttcan /can/status   modbus_link "up", modbus_ok 60, modbus_err 0
+mosnode /status       writes 60, coils 3, ch0/ch1 on, tripped false
+```
+
+Write counts matched at both ends with zero errors, so nothing was dropped and
+the node's auto-direction transceiver is not echoing. An injected triple click
+lit both lamps; a single click turned them off. Stopping the master left the
+lamps on for two more polls and then dark, and restarting it restored them on
+the next heartbeat.
+
 ### The receiver node
 
 The other end is a generic Modbus-RTU-to-MOSFET ESP32 — not in this repo. The
