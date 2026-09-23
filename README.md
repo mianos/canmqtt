@@ -856,7 +856,7 @@ Modbus has **no function code for time** — the spec has no notion of it, so
 every vendor invents one. The convention here is two holding registers at
 address 0 carrying a 32-bit Unix epoch, high word first, written with FC 0x10.
 Both ends are ours, so the address is a shared constant (`modbusbus::kTimeReg`
-and mosnode's `cfg::kTimeReg`) rather than a setting; a mismatch would be a
+and modswitch's `cfg::kTimeReg`) rather than a setting; a mismatch would be a
 silent no-op. Modbus *does* also define a broadcast — a write to unit 0 that
 nobody answers — which is the tidier way to reach many nodes, but this sends to
 each slave that already owns coils, so adding a node to the output table is all
@@ -913,11 +913,11 @@ mosquitto_sub -h $B -v -t "tele/$N/modbus"    # link transitions only, not every
 
 ### Verified against the real node
 
-2026-09-22, master and [mosnode](../mosnode) wired over RS485:
+2026-09-22, master and [modswitch](../modswitch) wired over RS485:
 
 ```
 mqttcan /can/status   modbus_link "up", modbus_ok 60, modbus_err 0
-mosnode /status       writes 60, coils 3, ch0/ch1 on, tripped false
+modswitch /status       writes 60, coils 3, ch0/ch1 on, tripped false
 ```
 
 Write counts matched at both ends with zero errors, so nothing was dropped and

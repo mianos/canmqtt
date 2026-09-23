@@ -41,7 +41,7 @@ constexpr int kPinDe    = 21;   // transceiver DE, driven as RTS by the UART
 
 // Holding register carrying the wall clock: two registers, a 32-bit Unix epoch
 // with the high word first. Both ends of this bus are ours, so the address is a
-// shared constant rather than a setting — mosnode's Config.h declares the same
+// shared constant rather than a setting — modswitch's Config.h declares the same
 // number, and a mismatch would be a silent no-op.
 constexpr uint16_t kTimeReg = 0;
 }  // namespace modbusbus
