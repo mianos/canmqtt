@@ -127,7 +127,7 @@ Commands — `cmnd/mqttcan/…`:
 | `settings` | any subset of the `/config` JSON | apply + persist |
 | `canreset` | `{}` | clear the frame table + dump ring |
 | `mark` | `{"text":"test high beam"}`, optionally `"reset":true` | label the capture — see [Test annotations](#test-annotations) |
-| `output` | `{"name":"driving","set":"on"\|"off"\|"toggle"}` | drive an output — see [Driving lights](#driving-lights) |
+| `output` | `{"name":"driving0","set":"on"\|"off"\|"toggle"}` | drive an output — see [Driving lights](#driving-lights) |
 | `restart` | `{}` | reboot |
 | `reprovision` | `{}` | clear Wi-Fi creds, reboot into ESP-Touch v2 |
 
@@ -142,8 +142,8 @@ Publishes — `tele/mqttcan/…`:
 | `frame` | `{"id":"0x2BC","ext":false,"dlc":8,"data":"DEADBEEF00000000","chg":"0C","t_us":…}` on each accepted change |
 | `signals` | decoded named values, e.g. `{"id":"0x2BC","engine_temp_c":88.5,"gear":"N"}` |
 | `mark` | `{"seq":7,"text":"test high beam","reset":false,"up_ms":1234567}` |
-| `gesture` | `{"gesture":"driving_lights","clicks":3,"action":"driving=on"}` on every resolved click burst, **including unmapped counts** (`"action":""`) |
-| `output` | `{"name":"driving","state":"on","by":"gesture:3"}` on every output change, whatever caused it |
+| `gesture` | `{"gesture":"driving_lights","clicks":3,"action":"driving0=on,driving1=on"}` on every resolved click burst, **including unmapped counts** (`"action":""`) |
+| `output` | `{"name":"driving0","state":"on","by":"gesture:3"}` on every output change, whatever caused it |
 | `modbus` | `{"link":"down","ok":412,"err":3,"last_error":"ESP_ERR_TIMEOUT"}` on RS485 link **transitions** only |
 | `stats` | bus health, 1/min — the bit-rate diagnostic |
 | `init`, `status` | identity + uptime/heap |
@@ -243,7 +243,7 @@ broker ACL or the board genuinely not publishing.
 | `POST /can/reset` | clear table + ring (and decode state) |
 | `POST /can/mark` | label the capture; `{"text":"…"[,"reset":true]}` |
 | `POST /can/inject` | push a synthetic frame through the software path; safe while listen-only |
-| `POST /can/output` | drive an output directly; `{"name":"driving","set":"on"}` |
+| `POST /can/output` | drive an output directly; `{"name":"driving0","set":"on"}` |
 | `GET`/`POST /config`, `POST /config/reset` | settings |
 | `GET`/`POST /firmware` | OTA (raw `.bin` body). `GET` reports `ota_state` — a new image confirms itself once it has an IP, with no deadline, so one powered off while still `pending_verify` silently boots the previous image next time. Check for `valid` before pulling power |
 | `GET /healthz`, `POST /reset`, `POST /set_hostname` | from the shared `WebServer` base. **`/reset` wipes the Wi-Fi credentials** and reboots into provisioning; it is not a restart. To reboot after a setting that needs one, use `cmnd/<name>/restart` over MQTT or power-cycle |
@@ -724,12 +724,17 @@ no reflash.
     "max_hold_ms": 600,
     "min_gap_ms": 60,              // contact-bounce floor
     "actions": {
-      "1": {"output": "driving", "set": "off"},
-      "3": {"output": "driving", "set": "on"}
+      "1": {"output": ["driving0", "driving1"], "set": "off"},
+      "3": {"output": ["driving0", "driving1"], "set": "on"}
     }
   }
 ]
 ```
+
+`output` is one name or a list. The shipped table has one output per lamp,
+`driving0` (coil 0) and `driving1` (coil 1), so each lamp can be switched on its
+own, and the gestures list both. Outputs cannot share a coil, so a combined
+output next to the per-lamp ones would be rejected at upload.
 
 `set` is `on`, `off` or `toggle`. A click count with no entry is published on
 `tele/…/gesture` and otherwise ignored, which is how you find out the board saw
@@ -813,11 +818,8 @@ own circuit and unaffected.
 ### Over RS485: a Modbus node at the front
 
 ```json
-"driving": {
-  "gpios": [],
-  "modbus": {"slave": 1, "coils": [0, 1]},
-  "active_low": false
-}
+"driving0": {"gpios": [], "modbus": {"slave": 1, "coils": [0]}, "active_low": false},
+"driving1": {"gpios": [], "modbus": {"slave": 1, "coils": [1]}, "active_low": false}
 ```
 
 `active_low` applies to `gpios` only. A coil carries the logical state and the
@@ -953,9 +955,9 @@ MOSFET can conduct. Fit a pull-down at each gate.
 ### Control and the kill switch
 
 ```sh
-curl -X POST -d '{"name":"driving","set":"on"}'     http://mqttcan.local/can/output
-curl -X POST -d '{"name":"driving","set":"toggle"}' http://mqttcan.local/can/output
-mosquitto_pub -h $B -t cmnd/$N/output -m '{"name":"driving","set":"off"}'
+curl -X POST -d '{"name":"driving0","set":"on"}'     http://mqttcan.local/can/output
+curl -X POST -d '{"name":"driving0","set":"toggle"}' http://mqttcan.local/can/output
+mosquitto_pub -h $B -t cmnd/$N/output -m '{"name":"driving0","set":"off"}'
 
 mosquitto_sub -h $B -v -t "tele/$N/gesture" -t "tele/$N/output"
 ```
@@ -979,7 +981,7 @@ ON='{"id":"0x130","data":"00000000000009CF"}'   # D6 low nibble 9 = high beam on
 OFF='{"id":"0x130","data":"0000000000000ACF"}'  # A = off
 click() { curl -sX POST -d "$ON" $B/can/inject; curl -sX POST -d "$OFF" $B/can/inject; }
 
-click; click; click; sleep 1.5   # -> output_driving "on"
+click; click; click; sleep 1.5   # -> output_driving0 and output_driving1 "on"
 click;             sleep 1.5     # -> "off"
 click; click;      sleep 1.5     # -> unchanged, clicks:2 is unmapped
 ```

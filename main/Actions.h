@@ -158,8 +158,14 @@ private:
 // JSON (a top-level "gestures" array in signals.json):
 //   {"name": "driving_lights", "signal": "high_beam", "trigger": "on",
 //    "window_ms": 1000, "max_hold_ms": 600, "min_gap_ms": 60,
-//    "actions": {"1": {"output": "driving", "set": "off"},
-//                "3": {"output": "driving", "set": "on"}}}
+//    "actions": {"1": {"output": ["driving0", "driving1"], "set": "off"},
+//                "3": {"output": ["driving0", "driving1"], "set": "on"}}}
+//
+// "output" is one output name or a list of them. A list is how one gesture
+// switches several lamps while each lamp stays its own output, individually
+// addressable over HTTP and MQTT: outputs may not share a coil, so a combined
+// output alongside per-lamp ones is not an option. "toggle" flips each listed
+// output on its own, so lamps already out of step stay out of step.
 //
 // A click is a *complete short pulse*, not a transition: the signal must reach
 // `trigger` and leave it again within max_hold_ms, and the click is counted on
@@ -206,7 +212,7 @@ public:
 
 private:
     struct Action {
-        std::string       output;
+        std::vector<std::string> outputs;
         OutputBank::Level level = OutputBank::Level::Off;
     };
 
@@ -238,7 +244,7 @@ private:
         int         clicks;
         std::string action;      // "" when unmapped
         bool        hasAction;
-        std::string output;
+        std::vector<std::string> outputs;
         OutputBank::Level level;
     };
 

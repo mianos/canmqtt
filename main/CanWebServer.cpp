@@ -653,7 +653,7 @@ esp_err_t CanWebServer::can_inject_post_handler(httpd_req_t* req) {
 }
 
 // POST /can/output — drive a relay by name, bypassing the gestures:
-//   curl -X POST -d '{"name":"driving","set":"on"}' http://mqttcan.local/can/output
+//   curl -X POST -d '{"name":"driving0","set":"on"}' http://mqttcan.local/can/output
 //
 // This is how a relay is proved out on the bench before a lever is ever pulled,
 // and how Node-RED drives the lights directly. The reply carries the state of

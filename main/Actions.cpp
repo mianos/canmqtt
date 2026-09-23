@@ -459,7 +459,25 @@ bool GestureEngine::loadJson(const std::string& json, std::string& errorOut) {
                 return false;
             }
             Action act;
-            act.output = stringOr(a, "output", "");
+            const cJSON* out = cJSON_GetObjectItem(a, "output");
+            if (cJSON_IsString(out) && out->valuestring != nullptr) {
+                act.outputs.emplace_back(out->valuestring);
+            } else if (cJSON_IsArray(out)) {
+                const cJSON* o = nullptr;
+                cJSON_ArrayForEach(o, out) {
+                    if (!cJSON_IsString(o) || o->valuestring == nullptr) {
+                        act.outputs.clear();
+                        break;
+                    }
+                    act.outputs.emplace_back(o->valuestring);
+                }
+            }
+            if (act.outputs.empty()) {
+                errorOut = gd.name + ": action " + a->string +
+                           " needs \"output\" as a name or a non-empty list of names";
+                cJSON_Delete(root);
+                return false;
+            }
             if (!parseOutputLevel(stringOr(a, "set", ""), act.level)) {
                 errorOut = gd.name + ": action " + a->string +
                            " needs \"set\" of on, off or toggle";
@@ -469,11 +487,13 @@ bool GestureEngine::loadJson(const std::string& json, std::string& errorOut) {
             // Checked here so a misspelled output is a 400 on upload rather
             // than a gesture that silently does nothing on the bike. This is
             // why outputs must be loaded before gestures.
-            if (!outputs_.has(act.output)) {
-                errorOut = gd.name + ": action " + a->string +
-                           " targets unknown output '" + act.output + "'";
-                cJSON_Delete(root);
-                return false;
+            for (const std::string& name : act.outputs) {
+                if (!outputs_.has(name)) {
+                    errorOut = gd.name + ": action " + a->string +
+                               " targets unknown output '" + name + "'";
+                    cJSON_Delete(root);
+                    return false;
+                }
             }
             gd.actions.emplace_back((int)clicks, act);
             if ((int)clicks > gd.maxClicks) gd.maxClicks = (int)clicks;
@@ -575,12 +595,15 @@ void GestureEngine::tick(uint64_t nowUs) {
             for (const auto& kv : gd.actions) {
                 if (kv.first != gd.clicks) continue;
                 f.hasAction = true;
-                f.output    = kv.second.output;
+                f.outputs   = kv.second.outputs;
                 f.level     = kv.second.level;
-                f.action    = f.output + "=" +
-                              (kv.second.level == OutputBank::Level::On     ? "on"
-                             : kv.second.level == OutputBank::Level::Off    ? "off"
-                                                                            : "toggle");
+                const char* lv = kv.second.level == OutputBank::Level::On  ? "on"
+                               : kv.second.level == OutputBank::Level::Off ? "off"
+                                                                           : "toggle";
+                for (const std::string& name : f.outputs) {
+                    if (!f.action.empty()) f.action += ",";
+                    f.action += name + "=" + lv;
+                }
                 break;
             }
             gd.clicks = 0;
@@ -594,7 +617,7 @@ void GestureEngine::tick(uint64_t nowUs) {
                  f.name.c_str(), f.clicks, f.hasAction ? f.action.c_str() : "(unmapped)");
         if (f.hasAction) {
             const std::string by = "gesture:" + std::to_string(f.clicks);
-            outputs_.set(f.output, f.level, by.c_str());
+            for (const std::string& name : f.outputs) outputs_.set(name, f.level, by.c_str());
         }
         if (report_) report_(f.name, f.clicks, f.action);
     }

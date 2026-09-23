@@ -30,7 +30,7 @@
 //   settings    any subset of the /config JSON (e.g. {"can_bitrate":125000})
 //   canreset    {}  clear the frame table + dump ring (baseline before an action)
 //   mark        {"text":"test high beam"[,"reset":true]}  label the capture
-//   output      {"name":"driving","set":"on"|"off"|"toggle"}  drive an output
+//   output      {"name":"driving0","set":"on"|"off"|"toggle"}  drive an output
 //                   (local GPIOs and/or coils on an RS485 Modbus node)
 //   restart     {}
 //   reprovision {}  clears Wi-Fi creds, reboots into ESP-Touch v2 provisioning
@@ -40,8 +40,8 @@
 //   tele/<name>/signals {"id":"0x2BC","engine_temp_c":88.5,"gear":"N"} — named
 //                       values, whenever one moves past its own deadband
 //   tele/<name>/mark    {"seq":7,"text":"test high beam","reset":false,"up_ms":…}
-//   tele/<name>/gesture {"gesture":"driving_lights","clicks":3,"action":"driving=on"}
-//   tele/<name>/output  {"name":"driving","state":"on","by":"gesture:3"}
+//   tele/<name>/gesture {"gesture":"driving_lights","clicks":3,"action":"driving0=on,driving1=on"}
+//   tele/<name>/output  {"name":"driving0","state":"on","by":"gesture:3"}
 //   tele/<name>/modbus  {"link":"down","ok":412,"err":3,...} on link transitions
 //   tele/<name>/stats   bus health + rates, 1/min — the bit-rate diagnostic
 //   tele/<name>/init,status   identity + telemetry
@@ -256,7 +256,7 @@ esp_err_t handleMark(MqttClient*, const std::string&, const JsonWrapper& d, void
     return ESP_OK;
 }
 
-// cmnd/<name>/output — {"name":"driving","set":"on"|"off"|"toggle"}.
+// cmnd/<name>/output — {"name":"driving0","set":"on"|"off"|"toggle"}.
 // Manual control for Node-RED, and the way to exercise a relay from the bench
 // without pulling a lever. Same body as POST /can/output; the state change is
 // announced on tele/<name>/output by the change hook, not from here.
