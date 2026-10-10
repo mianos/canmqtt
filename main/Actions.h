@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -39,6 +40,9 @@
 //     "auto_off_ms": 0,             force off after this long on (0 = never)
 //     "off_when": {"signal": "ignition", "is": "off"}
 //   }
+//
+// "off_when" may also be a LIST of such conditions; any one of them switches
+// the output off. Used for ignition off OR engine stopped.
 //
 // active_low applies to `gpios` only. A coil carries the logical state and the
 // slave decides its own polarity — putting the inversion in two places is how
@@ -125,8 +129,7 @@ private:
         std::vector<Coil>       coils;
         bool                    activeLow  = false;
         uint32_t                autoOffMs  = 0;
-        std::string             offWhenSignal;   // empty = no interlock
-        std::string             offWhenIs;
+        std::vector<std::pair<std::string, std::string>> offWhen;   // (signal, is); empty = none
 
         bool     on         = false;
         uint64_t onSinceUs  = 0;
@@ -184,12 +187,28 @@ private:
 // has to be short to keep the action responsive, and a short window splits a
 // burst whenever the rider is slow or the bus loses a pulse between frames.
 //
+// Optional "off_on_release": an output name or list. While ANY of them is on,
+// the control leaving `trigger` switches them all off at once, and that release
+// is not counted as a click. Counted gestures are too slow to dip auxiliary
+// lights for oncoming traffic — "off" on a lower count has to wait out
+// window_ms in case another click is coming — so once the lights are on, a
+// flash or dipping a held high beam kills them within one frame (~200ms on the
+// K25's 130). Pressing the control does nothing extra, so the high beam can be
+// held on alongside the driving lights. Absent => no change in behaviour.
+//
+// Optional "require": {"signal": "engine", "is": "running"}. A burst that would
+// switch anything ON or toggle is refused unless that enum signal's latest
+// value matches, and is reported with the reason instead of the action. Off
+// actions and off_on_release are never blocked. Until the signal has been seen
+// at all the requirement counts as unmet. Only gestures are gated: HTTP and MQTT
+// commands still switch outputs directly, which is what bench testing needs.
+//
 // Signal names are the decode table's own, so any enum signal can drive this
 // without a firmware change.
 class GestureEngine {
 public:
     // gesture name, click count, and the action taken ("" when the count is
-    // unmapped). Reported for every resolved burst, including unmapped counts —
+    // unmapped, "blocked: <signal> is <value>" when "require" refused it). Reported for every resolved burst, including unmapped counts —
     // that is the view that says "I saw 2" when you meant 3.
     using ReportFn = std::function<void(const std::string&, int, const std::string&)>;
 
@@ -225,6 +244,9 @@ private:
         uint32_t    minGapMs  = 60;
         std::vector<std::pair<int, Action>> actions;   // click count -> action
         int         maxClicks = 0;   // highest mapped count; reaching it fires early
+        std::vector<std::string> releaseOff;   // "off_on_release"; empty == unused
+        std::string requireSignal;   // "require"; empty == none
+        std::string requireIs;
 
         // Runtime. lastText is the engine's own view of the signal, deliberately
         // not SignalTable's: resetState() (from canreset/mark) makes the next
@@ -237,6 +259,7 @@ private:
         int         clicks        = 0;
         uint64_t    lastReleaseUs = 0;
         bool        fireNow       = false;   // count hit maxClicks; resolve on the next tick
+        bool        releasePending = false;  // a release to check against releaseOff on tick
     };
 
     struct Fired {
@@ -251,6 +274,11 @@ private:
     mutable SemaphoreHandle_t lock_;
     OutputBank&               outputs_;
     std::vector<Gesture>      gestures_;
+    // Latest value of every enum signal seen, kept OUTSIDE gestures_ so a table
+    // reload cannot forget it. Signals only report on change, so a "require"
+    // that started from scratch on reload stayed "unknown" until the engine
+    // next changed state (seen on the bike 2026-10-10).
+    std::map<std::string, std::string> lastSignal_;
     ReportFn                  report_;
 };
 

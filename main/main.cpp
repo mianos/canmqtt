@@ -42,7 +42,7 @@
 //   tele/<name>/mark    {"seq":7,"text":"test high beam","reset":false,"up_ms":…}
 //   tele/<name>/gesture {"gesture":"driving_lights","clicks":3,"action":"driving0=on,driving1=on"}
 //   tele/<name>/output  {"name":"driving0","state":"on","by":"gesture:3"}
-//   tele/<name>/modbus  {"link":"down","ok":412,"err":3,...} on link transitions
+//   tele/<name>/modbus  {"link":"down","ok":412,"err":3,...} at start and on link transitions
 //   tele/<name>/stats   bus health + rates, 1/min — the bit-rate diagnostic
 //   tele/<name>/init,status   identity + telemetry
 // HTTP: /healthz /config /firmware /can/ids /can/dump /can/status /can/reset
@@ -419,6 +419,16 @@ void telemetryTask(void* arg) {
     init.AddItem("settings", "cmnd/" + app->settings->sensorName + "/settings");
     app->mqtt->publish(base + "init", init.ToString());
 
+    // Restate the link alongside init. modbusTask reports its first state within
+    // a second of boot, before MQTT is up, and on a cold boot the first burst of
+    // frame publishes overflows MqttClient's 32-message offline queue (drop
+    // oldest) and takes that report with it — leaving the topic on a "down" from
+    // some earlier boot. Seen on the bike 2026-10-10.
+    if (app->modbusReport && app->modbus) {
+        const ModbusBus::Health h = app->modbus->health();
+        if (h.running && h.ok + h.err > 0) app->modbusReport(h.consecErr == 0, h);
+    }
+
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(60000));
         JsonWrapper d;
@@ -459,7 +469,11 @@ void actionsTask(void* arg) {
 // would be a use-after-free, and a settings change arrives on the MQTT task.
 void modbusTask(void* arg) {
     auto* app = static_cast<App*>(arg);
-    bool lastLinkUp = true;   // so the first failure reports a transition
+    // -1 until the first cycle of each port start has been reported. Starting at
+    // "up" meant a boot whose link was healthy from the first poll published
+    // nothing, so the topic kept the last "down" from a boot where the node was
+    // unpowered, and read as a fault that no longer existed.
+    int lastLinkUp = -1;
     uint64_t lastTimeUs = 0;  // last clock distribution, 0 == never
 
     for (;;) {
@@ -470,7 +484,7 @@ void modbusTask(void* arg) {
                 vTaskDelay(pdMS_TO_TICKS(5000));   // retry slowly; nothing else to do
                 continue;
             }
-            lastLinkUp = true;
+            lastLinkUp = -1;
             // Send the clock on the first cycle of a fresh port rather than up
             // to a minute later. A link that has just come up is exactly where
             // a node that rebooted and lost its clock is waiting.
@@ -549,7 +563,7 @@ void modbusTask(void* arg) {
 
         const ModbusBus::Health h = app->modbus->health();
         const bool linkUp = (h.consecErr == 0);
-        if (linkUp != lastLinkUp) {
+        if ((int)linkUp != lastLinkUp) {
             lastLinkUp = linkUp;
             if (app->modbusReport) app->modbusReport(linkUp, h);
         }
@@ -784,8 +798,9 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "output %s -> %s (%s)", name.c_str(), on ? "on" : "off", by);
     });
 
-    // Only transitions, not every failed cycle: a node that is unplugged over
-    // winter should cost one retained-looking message, not one per second.
+    // The first resolved state after each port start, then transitions only — not
+    // every failed cycle: a node that is unplugged over winter should cost one
+    // message, not one per second.
     app.modbusReport = [](bool up, const ModbusBus::Health& h) {
         JsonWrapper d;
         d.AddItem("link",  std::string(up ? "up" : "down"));

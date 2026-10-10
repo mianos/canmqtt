@@ -144,7 +144,7 @@ Publishes — `tele/mqttcan/…`:
 | `mark` | `{"seq":7,"text":"test high beam","reset":false,"up_ms":1234567}` |
 | `gesture` | `{"gesture":"driving_lights","clicks":3,"action":"driving0=on,driving1=on"}` on every resolved click burst, **including unmapped counts** (`"action":""`) |
 | `output` | `{"name":"driving0","state":"on","by":"gesture:3"}` on every output change, whatever caused it |
-| `modbus` | `{"link":"down","ok":412,"err":3,"last_error":"ESP_ERR_TIMEOUT"}` on RS485 link **transitions** only |
+| `modbus` | `{"link":"down","ok":412,"err":3,"last_error":"ESP_ERR_TIMEOUT"}` once when the link is first resolved after boot, then on RS485 link **transitions** only |
 | `stats` | bus health, 1/min — the bit-rate diagnostic |
 | `init`, `status` | identity + uptime/heap |
 | `settingsack` | full settings after a `settings` command |
@@ -652,7 +652,8 @@ Clear the table afterwards, and remember a power cycle resets the counter.
 
 The one feature that makes this board *act* rather than only watch: click the
 high beam three times inside a second and a pair of auxiliary driving lights
-comes on, one click turns them off. No extra switch on the bars, no tap into the
+comes on, and once they are on any release of the high beam (a flash, or dipping
+it for oncoming traffic) switches them off within one frame. No extra switch on the bars, no tap into the
 loom beyond the relay feed.
 
 The CAN side is unaffected. The TWAI controller stays in hardware listen-only
@@ -690,12 +691,17 @@ is a reliable way to abort a miscount.
 
 `window_ms` runs from the **last** release, not the first, so a slow triple
 still resolves as three rather than being truncated at two. The cost is that a
-single click takes `window_ms` to act — the board cannot know a second one is
-not coming.
+lower count would take `window_ms` to act — the board cannot know another one is
+not coming. That is why off is not a count at all (see below).
 
-**A single flash-to-pass switches the driving lights off.** That is deliberate
-and was chosen knowingly; it is the price of `1 = off`. Change the `"1"` key to
-`"2"` in the table if it becomes a nuisance on the road.
+**Off is `off_on_release`, not a click count.** While any listed output is on,
+the high beam *leaving* "on" switches them all off on the next 25 ms tick, and
+that release is not counted. A counted off (it was 1 click, then 2) has to wait
+out `window_ms` in case another click follows, which was several seconds too
+slow to dip for an oncoming car. Pressing the high beam does nothing extra, so
+it can be held on alongside the driving lights; letting go of it, or flashing
+it, kills them. The blinker cancel was tried as an off button and is not on the
+bus at all.
 
 One inherent limit: `130` is cyclic, so a flash shorter than one frame period
 never reaches the decoder at all. Nothing in firmware can recover that.
@@ -723,8 +729,8 @@ no reflash.
     "window_ms": 1000,
     "max_hold_ms": 600,
     "min_gap_ms": 60,              // contact-bounce floor
+    "off_on_release": ["driving0", "driving1"],  // optional: instant off, see below
     "actions": {
-      "1": {"output": ["driving0", "driving1"], "set": "off"},
       "3": {"output": ["driving0", "driving1"], "set": "on"}
     }
   }
@@ -910,7 +916,7 @@ accepted it.
 
 ```sh
 curl -s http://mqttcan.local/can/status | jq '{modbus_link, modbus_ok, modbus_err}'
-mosquitto_sub -h $B -v -t "tele/$N/modbus"    # link transitions only, not every cycle
+mosquitto_sub -h $B -v -t "tele/$N/modbus"    # state at boot, then transitions only
 ```
 
 ### Verified against the real node

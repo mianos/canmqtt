@@ -196,13 +196,28 @@ bool OutputBank::loadJson(const std::string& json, std::string& errorOut) {
         }
 
         const cJSON* when = cJSON_GetObjectItem(item, "off_when");
-        if (cJSON_IsObject(when)) {
-            o.offWhenSignal = stringOr(when, "signal", "");
-            o.offWhenIs     = stringOr(when, "is", "");
-            if (o.offWhenSignal.empty() || o.offWhenIs.empty()) {
-                errorOut = o.name + ": 'off_when' needs both 'signal' and 'is'";
+        if (when != nullptr) {
+            std::vector<const cJSON*> conds;
+            if (cJSON_IsObject(when)) {
+                conds.push_back(when);
+            } else if (cJSON_IsArray(when)) {
+                const cJSON* c = nullptr;
+                cJSON_ArrayForEach(c, when) conds.push_back(c);
+            }
+            if (conds.empty()) {
+                errorOut = o.name + ": 'off_when' must be a condition or a non-empty list";
                 cJSON_Delete(root);
                 return false;
+            }
+            for (const cJSON* c : conds) {
+                const std::string sig = cJSON_IsObject(c) ? stringOr(c, "signal", "") : "";
+                const std::string is  = cJSON_IsObject(c) ? stringOr(c, "is", "") : "";
+                if (sig.empty() || is.empty()) {
+                    errorOut = o.name + ": each 'off_when' needs both 'signal' and 'is'";
+                    cJSON_Delete(root);
+                    return false;
+                }
+                o.offWhen.emplace_back(sig, is);
             }
         }
         built.push_back(std::move(o));
@@ -273,9 +288,9 @@ bool OutputBank::set(const std::string& name, Level level, const char* by) {
 void OutputBank::onSignal(const std::string& signal, const std::string& text) {
     LockGuard g(lock_);
     for (Output& o : outputs_) {
-        if (o.on && !o.offWhenSignal.empty() &&
-            o.offWhenSignal == signal && o.offWhenIs == text) {
-            o.offPending = true;
+        if (!o.on) continue;
+        for (const auto& c : o.offWhen) {
+            if (c.first == signal && c.second == text) o.offPending = true;
         }
     }
 }
@@ -498,6 +513,45 @@ bool GestureEngine::loadJson(const std::string& json, std::string& errorOut) {
             gd.actions.emplace_back((int)clicks, act);
             if ((int)clicks > gd.maxClicks) gd.maxClicks = (int)clicks;
         }
+
+        const cJSON* req = cJSON_GetObjectItem(item, "require");
+        if (req != nullptr) {
+            gd.requireSignal = cJSON_IsObject(req) ? stringOr(req, "signal", "") : "";
+            gd.requireIs     = cJSON_IsObject(req) ? stringOr(req, "is", "") : "";
+            if (gd.requireSignal.empty() || gd.requireIs.empty()) {
+                errorOut = gd.name + ": 'require' needs both 'signal' and 'is'";
+                cJSON_Delete(root);
+                return false;
+            }
+        }
+
+        const cJSON* ror = cJSON_GetObjectItem(item, "off_on_release");
+        if (ror != nullptr) {
+            if (cJSON_IsString(ror) && ror->valuestring != nullptr) {
+                gd.releaseOff.emplace_back(ror->valuestring);
+            } else if (cJSON_IsArray(ror)) {
+                const cJSON* o = nullptr;
+                cJSON_ArrayForEach(o, ror) {
+                    if (cJSON_IsString(o) && o->valuestring != nullptr) {
+                        gd.releaseOff.emplace_back(o->valuestring);
+                    }
+                }
+            }
+            if (gd.releaseOff.empty()) {
+                errorOut = gd.name + ": 'off_on_release' must be an output name or a "
+                                     "non-empty list of names";
+                cJSON_Delete(root);
+                return false;
+            }
+            for (const std::string& name : gd.releaseOff) {
+                if (!outputs_.has(name)) {
+                    errorOut = gd.name + ": off_on_release targets unknown output '" +
+                               name + "'";
+                    cJSON_Delete(root);
+                    return false;
+                }
+            }
+        }
         built.push_back(std::move(gd));
     }
     cJSON_Delete(root);
@@ -518,6 +572,7 @@ bool GestureEngine::loadJson(const std::string& json, std::string& errorOut) {
 void GestureEngine::onSignal(const std::string& signal, const std::string& text,
                              uint64_t recvUs) {
     LockGuard g(lock_);
+    lastSignal_[signal] = text;
     for (Gesture& gd : gestures_) {
         if (gd.signal != signal) continue;
 
@@ -546,6 +601,10 @@ void GestureEngine::onSignal(const std::string& signal, const std::string& text,
         }
         if (!gd.pressed) continue;
         gd.pressed = false;
+        // Every release, short or held: dipping a high beam that has been on
+        // for a mile is exactly the case off_on_release exists for. Whether the
+        // outputs are on is decided in tick(), which owns acting.
+        if (!gd.releaseOff.empty()) gd.releasePending = true;
 
         const uint64_t held = recvUs - gd.pressedUs;
         if (held > (uint64_t)gd.maxHoldMs * 1000ULL) {
@@ -581,6 +640,37 @@ void GestureEngine::tick(uint64_t nowUs) {
     std::vector<Fired> fired;
     {
         LockGuard g(lock_);
+        // Lock order is always this engine then OutputBank; OutputBank never
+        // calls back into gestures, so reading its state here cannot deadlock.
+        std::vector<std::pair<std::string, bool>> states;
+        for (Gesture& gd : gestures_) {
+            if (!gd.releasePending) continue;
+            gd.releasePending = false;
+            if (states.empty()) states = outputs_.states();
+            bool armed = false;
+            for (const auto& st : states) {
+                if (!st.second) continue;
+                for (const std::string& name : gd.releaseOff) {
+                    if (st.first == name) armed = true;
+                }
+            }
+            if (!armed) continue;
+            // The release is consumed: it switched the lights off, so it must
+            // not also start a count that resolves 2.5s later.
+            gd.clicks  = 0;
+            gd.fireNow = false;
+            Fired f;
+            f.name      = gd.name;
+            f.clicks    = 0;
+            f.hasAction = true;
+            f.outputs   = gd.releaseOff;
+            f.level     = OutputBank::Level::Off;
+            for (const std::string& name : f.outputs) {
+                if (!f.action.empty()) f.action += ",";
+                f.action += name + "=off";
+            }
+            fired.push_back(std::move(f));
+        }
         for (Gesture& gd : gestures_) {
             if (gd.clicks == 0 || gd.pressed) continue;
             if (!gd.fireNow &&
@@ -594,6 +684,14 @@ void GestureEngine::tick(uint64_t nowUs) {
             f.level     = OutputBank::Level::Off;
             for (const auto& kv : gd.actions) {
                 if (kv.first != gd.clicks) continue;
+                if (kv.second.level != OutputBank::Level::Off && !gd.requireSignal.empty()) {
+                    const auto seen = lastSignal_.find(gd.requireSignal);
+                    const std::string now = seen == lastSignal_.end() ? "unknown" : seen->second;
+                    if (now != gd.requireIs) {
+                        f.action = "blocked: " + gd.requireSignal + " is " + now;
+                        break;
+                    }
+                }
                 f.hasAction = true;
                 f.outputs   = kv.second.outputs;
                 f.level     = kv.second.level;
@@ -614,9 +712,10 @@ void GestureEngine::tick(uint64_t nowUs) {
     // own, and the report callback publishes to MQTT.
     for (const Fired& f : fired) {
         ESP_LOGI(TAG, "gesture '%s': %d click(s) -> %s",
-                 f.name.c_str(), f.clicks, f.hasAction ? f.action.c_str() : "(unmapped)");
+                 f.name.c_str(), f.clicks, !f.action.empty() ? f.action.c_str() : "(unmapped)");
         if (f.hasAction) {
-            const std::string by = "gesture:" + std::to_string(f.clicks);
+            const std::string by = f.clicks == 0 ? std::string("gesture:release")
+                                                 : "gesture:" + std::to_string(f.clicks);
             for (const std::string& name : f.outputs) outputs_.set(name, f.level, by.c_str());
         }
         if (report_) report_(f.name, f.clicks, f.action);
